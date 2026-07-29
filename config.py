@@ -1,0 +1,14 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+LINKEDIN_ACCESS_TOKEN = os.getenv("LINKEDIN_ACCESS_TOKEN")
+LINKEDIN_PERSON_URN = os.getenv("LINKEDIN_PERSON_URN")
+META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
+INSTAGRAM_BUSINESS_ACCOUNT_ID = os.getenv("INSTAGRAM_BUSINESS_ACCOUNT_ID")
+PUBLISH_MODE = os.getenv("PUBLISH_MODE", "mock")
+
+DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_PLATFORM = "LinkedIn"

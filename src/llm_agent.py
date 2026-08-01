@@ -12,6 +12,12 @@ except ImportError:
     st = None
 
 
+def safe_text(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def get_openai_api_key():
     if st is not None:
         try:
@@ -24,31 +30,14 @@ def get_openai_api_key():
 def get_openai_client():
     api_key = get_openai_api_key()
     if not api_key:
-        raise ValueError("OPENAI_API_KEY not found in .streamlit/secrets.toml")
+        raise ValueError("OPENAI_API_KEY not found in Streamlit secrets")
     return OpenAI(api_key=api_key)
 
 
-def safe_text(value) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def extract_domain(url: str) -> str:
-    url = safe_text(url)
-    url = re.sub(r"^https?://", "", url)
-    url = url.split("/")[0]
-    return url.strip()
-
-
-def duckduckgo_search(query: str, max_results: int = 5) -> List[Dict]:
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+def duckduckgo_search(query: str, max_results: int = 3) -> List[Dict]:
+    headers = {"User-Agent": "Mozilla/5.0"}
     url = "https://html.duckduckgo.com/html/"
-    data = {"q": query}
-
-    response = requests.post(url, data=data, headers=headers, timeout=15)
+    response = requests.post(url, data={"q": query}, headers=headers, timeout=15)
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
@@ -56,18 +45,15 @@ def duckduckgo_search(query: str, max_results: int = 5) -> List[Dict]:
 
     for a in soup.select("a.result__a")[:max_results]:
         title = safe_text(a.get_text(" ", strip=True))
-        href = a.get("href", "").strip()
+        href = safe_text(a.get("href"))
         if title and href:
             results.append({"title": title, "url": href})
 
     return results
 
 
-def fetch_page_text(url: str, max_chars: int = 2500) -> str:
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
+def fetch_page_text(url: str, max_chars: int = 1200) -> str:
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
@@ -76,8 +62,7 @@ def fetch_page_text(url: str, max_chars: int = 2500) -> str:
         for tag in soup(["script", "style", "noscript"]):
             tag.decompose()
 
-        text = soup.get_text(" ", strip=True)
-        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
         return text[:max_chars]
     except Exception:
         return ""
@@ -86,110 +71,119 @@ def fetch_page_text(url: str, max_chars: int = 2500) -> str:
 def build_web_context(company_data: dict, post_data: dict) -> str:
     company_name = safe_text(company_data.get("company"))
     industry = safe_text(company_data.get("industry"))
-    post_type = safe_text(post_data.get("post_type"))
     title = safe_text(post_data.get("title"))
+    key_points = safe_text(post_data.get("key_points"))
+    audience = safe_text(post_data.get("audience"))
 
-    search_queries = [
-        f"{company_name} company {industry}".strip(),
+    queries = [
+        f"{company_name} {industry}".strip(),
         f"{company_name} latest news".strip(),
-        f"{company_name} {post_type} {title}".strip(),
+        f"{company_name} {title} {key_points} {audience}".strip(),
     ]
 
-    context_parts = []
+    blocks = []
 
-    for query in search_queries:
+    for query in queries:
         if not query:
             continue
 
         try:
-            results = duckduckgo_search(query, max_results=3)
+            results = duckduckgo_search(query, max_results=2)
         except Exception:
             continue
 
         if not results:
             continue
 
-        context_parts.append(f"Search query: {query}")
+        blocks.append(f"Search query: {query}")
 
-        for item in results[:2]:
-            title_text = safe_text(item.get("title"))
+        for item in results:
+            result_title = safe_text(item.get("title"))
             url = safe_text(item.get("url"))
-            page_text = fetch_page_text(url, max_chars=1500)
+            page_text = fetch_page_text(url, max_chars=1000)
+            if page_text:
+                blocks.append(
+                    f"Title: {result_title}\nURL: {url}\nExcerpt: {page_text[:600]}"
+                )
 
-            snippet = page_text[:700] if page_text else ""
-            block = f"Title: {title_text}\nURL: {url}\nContent: {snippet}"
-            context_parts.append(block)
-
-    return "\n\n".join(context_parts)[:6000]
+    return "\n\n".join(blocks)[:5000]
 
 
-def build_prompt(company_data: dict, post_data: dict, platform: str, tone: str, use_web_context: bool, web_context: str) -> str:
+def build_prompt(
+    company_data: dict,
+    post_data: dict,
+    platform: str,
+    tone: str,
+    web_context: str,
+) -> str:
     company_name = safe_text(company_data.get("company"))
     industry = safe_text(company_data.get("industry"))
-    company_about = safe_text(company_data.get("about"))
+    about = safe_text(company_data.get("about"))
     brand_voice = safe_text(company_data.get("brand_voice"))
 
     post_type = safe_text(post_data.get("post_type"))
-    post_title = safe_text(post_data.get("title"))
-    post_body = safe_text(post_data.get("body"))
+    title = safe_text(post_data.get("title"))
+    body = safe_text(post_data.get("body"))
     key_points = safe_text(post_data.get("key_points"))
     audience = safe_text(post_data.get("audience"))
     media_type = safe_text(post_data.get("media_type"))
     media_file_name = safe_text(post_data.get("media_file_name"))
     media_note = safe_text(post_data.get("media_note"))
+    user_prompt = safe_text(post_data.get("user_prompt"))
 
     return f"""
-You are an expert social media content strategist.
+You are a senior content strategist and social media copywriter.
 
-Your job:
-1. Understand the company identity.
-2. Understand the current post/update the user wants to publish.
-3. If web context is available, use it to ground the company context and recent relevance.
-4. Generate polished content that feels specific to this company and this update.
-5. Do not sound generic, repetitive, or template-like.
-6. Do not invent unsupported claims. If web context is weak, rely more on user-provided data.
-7. Keep the company identity, post topic, and audience aligned.
+Write content that matches the user's intent, not generic marketing filler.
+Use the company context, the user prompt, and web context only to support and improve the final result.
+Do not invent claims or numbers.
 
-INPUTS
-
-Company name: {company_name}
+COMPANY
+Name: {company_name}
 Industry: {industry}
-Company about: {company_about}
+About: {about}
 Brand voice: {brand_voice}
 
+USER INTENT
+User prompt: {user_prompt}
 Post type: {post_type}
-Post title: {post_title}
-Post details: {post_body}
+Title: {title}
+Body: {body}
 Key points: {key_points}
 Audience: {audience}
 
+MEDIA
 Media type: {media_type}
 Media file name: {media_file_name}
 Media note: {media_note}
 
+PLATFORM
 Platform: {platform}
 Tone: {tone}
-Use web context: {use_web_context}
 
 WEB CONTEXT
 {web_context if web_context else "No external web context available."}
 
 OUTPUT RULES
-- hook: short, sharp opening line
-- main_post: platform-ready main body, specific and natural
-- caption: concise support line
+- hook: short opening line
+- main_post: polished platform-ready post
+- caption: short support caption
 - cta: one clear call to action
-- hashtags: one string with 4 to 8 relevant hashtags
-- Avoid fake statistics, fake achievements, and unverifiable claims
-- Keep the writing fresh and brand-aligned
-- If the post is about a launch, event, hiring, milestone, or thought leadership topic, reflect that clearly
-- If media is mentioned, lightly align the copy with that media context
-- Do not include markdown code fences
-- Return JSON only
-"""
+- hashtags: 4 to 8 relevant hashtags in one string
+- Keep it specific, natural, and aligned to the user’s intent
+- If the prompt is about internship, job, visit, event, or launch, reflect that directly
+- If web context exists, use it to enrich style and relevance, not to make unsupported claims
+- Return valid JSON only
+""".strip()
 
 
-def generate_social_content(company_data: dict, post_data: dict, platform: str, tone: str, use_web_context: bool = True) -> dict:
+def generate_social_content(
+    company_data: dict,
+    post_data: dict,
+    platform: str,
+    tone: str,
+    use_web_context: bool = True,
+) -> dict:
     client = get_openai_client()
 
     web_context = ""
@@ -206,10 +200,10 @@ def generate_social_content(company_data: dict, post_data: dict, platform: str, 
             "main_post": {"type": "string"},
             "caption": {"type": "string"},
             "cta": {"type": "string"},
-            "hashtags": {"type": "string"}
+            "hashtags": {"type": "string"},
         },
         "required": ["hook", "main_post", "caption", "cta", "hashtags"],
-        "additionalProperties": False
+        "additionalProperties": False,
     }
 
     prompt = build_prompt(
@@ -217,7 +211,6 @@ def generate_social_content(company_data: dict, post_data: dict, platform: str, 
         post_data=post_data,
         platform=platform,
         tone=tone,
-        use_web_context=use_web_context,
         web_context=web_context,
     )
 
@@ -226,26 +219,22 @@ def generate_social_content(company_data: dict, post_data: dict, platform: str, 
         messages=[
             {
                 "role": "system",
-                "content": "Return valid JSON only. Follow the schema exactly."
+                "content": "Return only valid JSON that matches the schema.",
             },
-            {
-                "role": "user",
-                "content": prompt
-            }
+            {"role": "user", "content": prompt},
         ],
         response_format={
             "type": "json_schema",
             "json_schema": {
                 "name": "social_content_package",
                 "schema": schema,
-                "strict": True
-            }
+                "strict": True,
+            },
         },
         temperature=0.7,
     )
 
-    content = response.choices[0].message.content
-    parsed = json.loads(content)
+    parsed = json.loads(response.choices[0].message.content)
 
     return {
         "hook": safe_text(parsed.get("hook")),

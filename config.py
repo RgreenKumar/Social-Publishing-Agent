@@ -1,14 +1,12 @@
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
+PUBLISH_MODE = os.getenv("PUBLISH_MODE", "mock").strip().lower()
+if PUBLISH_MODE not in {"mock", "real"}:
+    PUBLISH_MODE = "mock"
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-LINKEDIN_ACCESS_TOKEN = os.getenv("LINKEDIN_ACCESS_TOKEN")
-LINKEDIN_PERSON_URN = os.getenv("LINKEDIN_PERSON_URN")
-META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
-INSTAGRAM_BUSINESS_ACCOUNT_ID = os.getenv("INSTAGRAM_BUSINESS_ACCOUNT_ID")
-PUBLISH_MODE = os.getenv("PUBLISH_MODE", "mock")
+APP_NAME = os.getenv("APP_NAME", "Social Content Agent")
+DEFAULT_PLATFORM = os.getenv("DEFAULT_PLATFORM", "LinkedIn")
+DEFAULT_TONE = os.getenv("DEFAULT_TONE", "Professional")
+USE_WEB_CONTEXT = os.getenv("USE_WEB_CONTEXT", "true").strip().lower() in {"1", "true", "yes", "on"}
 
-DEFAULT_MODEL = "gpt-4o-mini"
-DEFAULT_PLATFORM = "LinkedIn"
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")

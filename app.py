@@ -1,462 +1,524 @@
-import os
-from datetime import datetime, timedelta, time
 import streamlit as st
-from src.storage import init_db, save_post_history, load_post_history
+import pandas as pd
+
+from src.data_loader import load_company_updates
+from src.workflow import create_draft
+from src.publisher import publish_post
+from src.storage import (
+    init_db,
+    save_post,
+    load_posts,
+    update_draft,
+    update_post_status,
+)
 
 try:
-    from config import PUBLISH_MODE
-except ImportError:
-    PUBLISH_MODE = "mock"
-
-try:
-    from src.llm_agent import generate_social_content
+    from src.research_agent import research_company, generate_platform_post
+    HAS_RESEARCH_AGENT = True
 except Exception:
-    generate_social_content = None
+    HAS_RESEARCH_AGENT = False
 
 
-st.set_page_config(page_title="Social Content Agent", page_icon="🧠", layout="wide")
-init_db()
-
-
-def get_recommended_time(platform: str) -> tuple[str, datetime]:
-    now = datetime.now()
-    weekday = now.weekday()
-
-    def next_weekday(target: int) -> datetime:
-        days_ahead = (target - weekday) % 7
-        if days_ahead == 0 and now.time() > time(10, 0):
-            days_ahead = 7
-        return now + timedelta(days=days_ahead)
-
-    platform = platform.lower()
-
-    if platform == "linkedin":
-        dt = next_weekday(2).replace(hour=9, minute=0, second=0, microsecond=0)
-    elif platform == "instagram":
-        dt = next_weekday(2).replace(hour=18, minute=0, second=0, microsecond=0)
-    elif platform == "facebook":
-        dt = next_weekday(1).replace(hour=11, minute=0, second=0, microsecond=0)
-    else:
-        dt = next_weekday(1).replace(hour=11, minute=0, second=0, microsecond=0)
-
-    return dt.strftime("%d %b %Y, %I:%M %p"), dt
-
-
-def build_company_payload(
-    company_name,
-    industry,
-    company_about,
-    brand_voice,
-):
-    return {
-        "company": company_name.strip(),
-        "industry": industry.strip(),
-        "about": company_about.strip(),
-        "brand_voice": brand_voice.strip(),
-    }
-
-
-def build_post_payload(
-    post_type,
-    post_topic,
-    post_details,
-    key_points,
-    audience,
-    media_type,
-    uploaded_file,
-    media_note,
-):
-    file_name = uploaded_file.name if uploaded_file is not None else ""
-    return {
-        "post_type": post_type.strip(),
-        "title": post_topic.strip(),
-        "body": post_details.strip(),
-        "key_points": key_points.strip(),
-        "audience": audience.strip(),
-        "media_type": media_type.strip(),
-        "media_file_name": file_name,
-        "media_note": media_note.strip(),
-    }
-
-
-def generate_fallback(company_data, post_data, platform, tone, use_web_context):
-    company = company_data["company"]
-    industry = company_data["industry"] or "business"
-    about = company_data["about"] or f"{company} operates in {industry}."
-    brand_voice = company_data["brand_voice"] or tone
-    post_type = post_data["post_type"]
-    title = post_data["title"]
-    body = post_data["body"]
-    key_points = post_data["key_points"]
-    audience = post_data["audience"]
-    media_type = post_data["media_type"]
-    media_file_name = post_data["media_file_name"]
-    media_note = post_data["media_note"]
-
-    hook = f"{company}: {title}"
-
-    context_lines = [about]
-    if key_points:
-        context_lines.append(f"Key points: {key_points}")
-    if audience:
-        context_lines.append(f"Audience: {audience}")
-    if media_type and media_type != "None":
-        media_text = f"Attached media: {media_type}"
-        if media_file_name:
-            media_text += f" ({media_file_name})"
-        if media_note:
-            media_text += f" - {media_note}"
-        context_lines.append(media_text)
-    if use_web_context:
-        context_lines.append("Use web context if available.")
-
-    tone_prefix_map = {
-        "Professional": "We’re pleased to share",
-        "Friendly": "Excited to share",
-        "Formal": "We would like to announce",
-    }
-    cta_map = {
-        "Professional": "What are your thoughts? Share them in the comments.",
-        "Friendly": "Would love to hear what you think.",
-        "Formal": "Please share your feedback.",
-    }
-
-    tone_prefix = tone_prefix_map.get(tone, "We’re pleased to share")
-    cta = cta_map.get(tone, "Share your thoughts.")
-    context_block = "\n".join(context_lines)
-
-    main_post = (
-        f"{tone_prefix} a {post_type.lower()} from {company}.\n\n"
-        f"{body}\n\n"
-        f"{context_block}\n\n"
-        f"This update reflects our focus on {industry.lower()} and a {brand_voice.lower()} brand voice."
+def init_page():
+    st.set_page_config(
+        page_title="Social Publishing Agent",
+        page_icon="📰",
+        layout="wide",
     )
-
-    caption = f"{company} | {title}"
-    hashtags = "#BusinessUpdate #BrandStory #Innovation #Growth"
-
-    if platform.lower() == "instagram":
-        caption = f"{title}"
-        hashtags = "#BrandUpdate #BusinessStory #Innovation #Launch"
-    elif platform.lower() == "twitter":
-        main_post = f"{company}: {title}\n\n{body[:180]}..."
-        caption = f"{company} update"
-        hashtags = "#Update #Business #News"
-
-    return {
-        "hook": hook,
-        "main_post": main_post,
-        "caption": caption,
-        "cta": cta,
-        "hashtags": hashtags,
-    }
+    st.title("Social Publishing Agent")
+    st.caption("Draft, review, research, and save social posts across platforms.")
 
 
-def generate_content(company_data, post_data, platform, tone, use_web_context):
-    if generate_social_content is not None:
-        try:
-            return generate_social_content(
-                company_data=company_data,
-                post_data=post_data,
-                platform=platform,
-                tone=tone,
-                use_web_context=use_web_context,
-            )
-        except Exception:
-            pass
+def normalize_draft_text(draft):
+    if draft is None:
+        return ""
 
-    return generate_fallback(company_data, post_data, platform, tone, use_web_context)
+    if isinstance(draft, dict):
+        return (
+            draft.get("main_post")
+            or draft.get("body")
+            or draft.get("text")
+            or draft.get("caption")
+            or str(draft)
+        )
 
-
-if "content_package" not in st.session_state:
-    st.session_state.content_package = None
-if "company_data" not in st.session_state:
-    st.session_state.company_data = None
-if "post_data" not in st.session_state:
-    st.session_state.post_data = None
-if "platform" not in st.session_state:
-    st.session_state.platform = "LinkedIn"
-if "tone" not in st.session_state:
-    st.session_state.tone = "Professional"
-if "use_web_context" not in st.session_state:
-    st.session_state.use_web_context = True
-if "recommended_time_text" not in st.session_state:
-    st.session_state.recommended_time_text = None
-if "recommended_datetime" not in st.session_state:
-    st.session_state.recommended_datetime = None
+    return str(draft)
 
 
-with st.sidebar:
-    st.title("Social Content Agent")
-    st.caption("Minimal AI posting workflow")
-    use_web_context = st.toggle("Use web context", value=st.session_state.use_web_context)
-    platform = st.selectbox("Platform", ["LinkedIn", "Twitter", "Facebook", "Instagram"])
-    tone = st.selectbox("Tone", ["Professional", "Friendly", "Formal"])
-    st.session_state.use_web_context = use_web_context
-    st.session_state.platform = platform
-    st.session_state.tone = tone
-    st.divider()
-    st.caption(f"Mode: {PUBLISH_MODE}")
-
-st.title("Social Content Agent")
-st.caption("Generate, review, and save.")
-
-tab1, tab2, tab3 = st.tabs(["Generate", "Review", "History"])
-
-with tab1:
-    with st.form("generate_form", clear_on_submit=False):
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.subheader("Company")
-            company_name = st.text_input("Company name", placeholder="Enter company name")
-            industry = st.text_input("Industry", placeholder="e.g. SaaS, Retail, AI")
-            company_about = st.text_area("About", height=100, placeholder="Short company description")
-            brand_voice = st.text_input("Brand voice", placeholder="e.g. bold, trusted, modern")
-
-        with col2:
-            st.subheader("Post")
-            post_type = st.selectbox(
-                "Post type",
-                [
-                    "Product Launch",
-                    "Hiring",
-                    "Event",
-                    "Milestone",
-                    "Thought Leadership",
-                    "Offer / Promotion",
-                    "General Update",
-                    "Custom",
-                ],
-            )
-            post_topic = st.text_input("Post title", placeholder="Short title")
-            post_details = st.text_area("Post details", height=100, placeholder="What is the update?")
-            key_points = st.text_area("Key points", height=80, placeholder="Important points to include")
-            audience = st.text_input("Audience", placeholder="e.g. founders, customers, students")
-
-            st.subheader("Media")
-            m1, m2 = st.columns([1, 2])
-
-        with m1:
-            media_type = st.selectbox("Media type", ["None", "Image", "Video", "Document"])
-            uploaded_file = st.file_uploader(
-                "Upload file",
-                type=["png", "jpg", "jpeg", "mp4", "mov", "pdf", "docx", "pptx"],
-                accept_multiple_files=False,
-            )
-            show_media_preview(uploaded_file, media_type)
-
-        with m2:
-            media_note = st.text_area(
-                "Media note",
-                height=80,
-                placeholder="What does the uploaded file show?",
-            )
-
-        submitted = st.form_submit_button("Generate", type="primary")
-
-    if submitted:
-        if not company_name.strip():
-            st.error("Enter company name.")
-        elif not post_topic.strip():
-            st.error("Enter post title.")
-        elif not post_details.strip():
-            st.error("Enter post details.")
-        else:
-            company_data = build_company_payload(
-                company_name=company_name,
-                industry=industry,
-                company_about=company_about,
-                brand_voice=brand_voice,
-            )
-            post_data = build_post_payload(
-                post_type=post_type,
-                post_topic=post_topic,
-                post_details=post_details,
-                key_points=key_points,
-                audience=audience,
-                media_type=media_type,
-                uploaded_file=uploaded_file,
-                media_note=media_note,
-            )
-
-            with st.spinner("Generating...", show_time=True):
-                content_package = generate_content(
-                    company_data=company_data,
-                    post_data=post_data,
-                    platform=platform,
-                    tone=tone,
-                    use_web_context=use_web_context,
-                )
-
-            st.session_state.company_data = company_data
-            st.session_state.post_data = post_data
-            st.session_state.content_package = content_package
-
-            rec_text, rec_dt = get_recommended_time(platform)
-            st.session_state.recommended_time_text = rec_text
-            st.session_state.recommended_datetime = rec_dt
-
-            st.success("Ready in Review.")
-
-with tab2:
-    if not st.session_state.content_package:
-        st.info("No draft yet.")
-    else:
-        package = st.session_state.content_package
-
-        left, right = st.columns([3, 1])
-
-        with right:
-            st.metric("Status", "Draft")
-            st.metric("Platform", st.session_state.platform)
-            if st.session_state.recommended_time_text:
-                st.metric("Best time", st.session_state.recommended_time_text)
-
-        with left:
-            hook_value = st.text_area("Hook", package["hook"], height=70)
-            main_post_value = st.text_area("Main post", package["main_post"], height=220)
-            caption_value = st.text_area("Caption", package["caption"], height=70)
-            cta_value = st.text_area("CTA", package["cta"], height=70)
-            hashtags_value = st.text_area("Hashtags", package["hashtags"], height=70)
-
-        default_dt = st.session_state.recommended_datetime or datetime.now() + timedelta(hours=1)
-
-        s1, s2 = st.columns(2)
-        with s1:
-            schedule_date = st.date_input(
-                "Date",
-                value=default_dt.date(),
-                min_value=datetime.now().date(),
-            )
-        with s2:
-            schedule_time = st.time_input(
-                "Time",
-                value=default_dt.time().replace(second=0, microsecond=0),
-                step=timedelta(minutes=15),
-            )
-
-        scheduled_dt = datetime.combine(schedule_date, schedule_time)
-
-        content_is_valid = all([
-            hook_value.strip(),
-            main_post_value.strip(),
-            caption_value.strip(),
-            cta_value.strip(),
-            hashtags_value.strip(),
-        ])
-
-        formatted_draft = f"""HOOK:
-{hook_value}
-
-MAIN POST:
-{main_post_value}
-
-CAPTION:
-{caption_value}
-
-CTA:
-{cta_value}
-
-HASHTAGS:
-{hashtags_value}
-"""
-
-        a1, a2 = st.columns(2)
-
-        with a1:
-            approve = st.button("Approve", type="primary", use_container_width=True)
-        with a2:
-            reject = st.button("Reject", use_container_width=True)
-
-        if approve:
-            if not content_is_valid:
-                st.error("Complete all fields.")
-            elif scheduled_dt <= datetime.now():
-                st.error("Select a future time.")
-            else:
-                try:
-                    company_name = st.session_state.company_data["company"]
-                    post_title = st.session_state.post_data["title"]
-
-                    save_post_history(
-                        update_id=0,
-                        company=company_name,
-                        title=post_title,
-                        platform=st.session_state.platform,
-                        generated_post=formatted_draft,
-                        status="Approved",
-                        scheduled_time=scheduled_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                        recommended_time=st.session_state.recommended_time_text,
-                        publish_mode=PUBLISH_MODE,
-                    )
-                    st.success("Saved.")
-                except Exception as e:
-                    st.error(f"Save failed: {e}")
-
-        if reject:
-            if not content_is_valid:
-                st.error("Complete all fields.")
-            else:
-                try:
-                    company_name = st.session_state.company_data["company"]
-                    post_title = st.session_state.post_data["title"]
-
-                    save_post_history(
-                        update_id=0,
-                        company=company_name,
-                        title=post_title,
-                        platform=st.session_state.platform,
-                        generated_post=formatted_draft,
-                        status="Rejected",
-                        scheduled_time=scheduled_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                        recommended_time=st.session_state.recommended_time_text,
-                        publish_mode=PUBLISH_MODE,
-                    )
-                    st.warning("Rejected and saved.")
-                except Exception as e:
-                    st.error(f"Save failed: {e}")
-
-def show_media_preview(uploaded_file, media_type):
-    if uploaded_file is None or media_type == "None":
+def show_media_preview(uploaded_file, media_type: str):
+    if uploaded_file is None:
         return
 
-    file_name = uploaded_file.name.lower()
+    media_type = (media_type or "").lower()
 
-    if media_type == "Image" or file_name.endswith((".png", ".jpg", ".jpeg")):
-        st.image(uploaded_file, caption="Preview", width=180)
-
-    elif media_type == "Video" or file_name.endswith((".mp4", ".mov", ".mpeg", ".mpg", ".m4v")):
+    if media_type == "image":
+        st.subheader("Media preview")
+        st.image(uploaded_file, caption="Uploaded image", use_container_width=True)
+    elif media_type == "video":
+        st.subheader("Media preview")
         st.video(uploaded_file)
-
     else:
-        st.caption(f"Attached: {uploaded_file.name}")
-        
-with tab3:
-    history_df = load_post_history()
+        st.info("Preview not available for this media type.")
 
-    if history_df.empty:
-        st.info("No history.")
+
+def render_update_details(update: dict):
+    if not update:
+        st.warning("No update selected.")
+        return
+
+    st.subheader("Selected company update")
+    st.write(f"**Company:** {update.get('company', '')}")
+    st.write(f"**Title:** {update.get('title', '')}")
+    st.write(f"**Type:** {update.get('type', '')}")
+    st.write("**Body:**")
+    st.write(update.get("body", ""))
+
+
+def render_draft_output(draft):
+    if draft is None:
+        st.info("No draft generated yet.")
+        return
+
+    st.subheader("Generated draft")
+
+    if isinstance(draft, dict):
+        main_post = draft.get("main_post") or draft.get("body") or draft.get("text")
+        caption = draft.get("caption")
+        hook = draft.get("hook")
+        hashtags = draft.get("hashtags")
+
+        if hook:
+            st.markdown(f"**Hook:** {hook}")
+        if main_post:
+            st.markdown("**Main post:**")
+            st.write(main_post)
+        if caption:
+            st.markdown("**Caption:**")
+            st.write(caption)
+        if hashtags:
+            st.markdown("**Hashtags:**")
+            st.write(hashtags)
     else:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total", len(history_df))
-        c2.metric("Approved", int((history_df["status"] == "Approved").sum()))
-        c3.metric("Rejected", int((history_df["status"] == "Rejected").sum()))
-        c4.metric("Mode", PUBLISH_MODE)
+        st.write(draft)
 
-        status_filter = st.selectbox("Filter", ["All", "Approved", "Rejected"], index=0)
 
-        filtered_history = history_df.copy()
-        if status_filter != "All":
-            filtered_history = filtered_history[filtered_history["status"] == status_filter]
+def render_history():
+    st.subheader("Post History")
 
-        st.dataframe(filtered_history, use_container_width=True)
+    try:
+        rows = load_posts()
 
-        csv = filtered_history.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Download CSV",
-            data=csv,
-            file_name="post_history.csv",
-            mime="text/csv",
+        # load_posts() returns a DataFrame
+        if rows.empty:
+            st.info("No posts have been saved yet.")
+            return
+
+        preferred_columns = [
+            "id",
+            "timestamp",
+            "company",
+            "title",
+            "platform",
+            "tone",
+            "status",
+            "publish_mode",
+            "scheduled_time",
+            "published_url",
+        ]
+
+        display_columns = [col for col in preferred_columns if col in rows.columns]
+
+        st.dataframe(
+            rows[display_columns],
             use_container_width=True,
+            hide_index=True,
         )
+
+        st.markdown("### View saved post")
+
+        post_ids = rows["id"].astype(int).tolist()
+
+        selected_post_id = st.selectbox(
+            "Select post ID",
+            options=post_ids,
+            key="history_post_id",
+        )
+
+        selected_rows = rows[rows["id"] == selected_post_id]
+
+        if selected_rows.empty:
+            return
+
+        selected_post = selected_rows.iloc[0]
+
+        with st.expander(f"Post #{selected_post_id}", expanded=True):
+            st.markdown(f"**Company:** {selected_post.get('company', '')}")
+            st.markdown(f"**Platform:** {selected_post.get('platform', '')}")
+            st.markdown(f"**Status:** {selected_post.get('status', '')}")
+
+            st.text_area(
+                "Saved draft",
+                value=str(selected_post.get("draft", "")),
+                height=250,
+                disabled=True,
+                key=f"saved_draft_{selected_post_id}",
+            )
+
+            research = selected_post.get("research_summary", None)
+            if research and not pd.isna(research):
+                st.markdown("#### Research report")
+                st.write(research)
+
+            published_url = selected_post.get("published_url", None)
+            if published_url and not pd.isna(published_url):
+                st.link_button("Open published post", published_url)
+
+    except Exception as error:
+        st.error(f"Unable to load history: {error}")
+
+
+def main():
+    init_db()
+    init_page()
+
+    # session defaults
+    st.session_state.setdefault("current_update", None)
+    st.session_state.setdefault("current_draft", None)
+    st.session_state.setdefault("research_report", None)
+    st.session_state.setdefault("research_sources", [])
+    st.session_state.setdefault("saved_post_id", None)
+    st.session_state.setdefault("company_input", "")
+    st.session_state.setdefault("company_url", "")
+    st.session_state.setdefault("title_input", "")
+    st.session_state.setdefault("user_prompt", "")
+    st.session_state.setdefault("media_notes", "")
+    st.session_state.setdefault("media_name", None)
+    st.session_state.setdefault("media_type", None)
+
+    # Sidebar settings
+    st.sidebar.header("Draft settings")
+
+    workflow_mode = st.sidebar.radio(
+        "Workflow mode",
+        ["Manual company research", "Existing company updates"],
+        index=0,
+    )
+
+    platform = st.sidebar.selectbox(
+        "Platform",
+        ["LinkedIn", "Twitter/X", "Facebook", "Instagram"],
+    )
+
+    tone = st.sidebar.selectbox(
+        "Tone",
+        ["Professional", "Friendly", "Neutral", "Confident", "Celebratory"],
+    )
+
+    media_type = st.sidebar.selectbox(
+        "Media type",
+        ["None", "Image", "Video"],
+    )
+
+    uploaded_file = None
+    if media_type != "None":
+        uploaded_file = st.sidebar.file_uploader(
+            "Upload media",
+            type=["png", "jpg", "jpeg", "webp", "mp4", "mov", "avi"],
+        )
+
+    # Tabs
+    create_tab, research_tab, preview_tab, history_tab, publish_tab = st.tabs(
+        ["✍️ Create Post", "🌐 Research", "📝 Draft Preview", "📚 History", "🚀 Publish"]
+    )
+
+    with create_tab:
+        if workflow_mode == "Existing company updates":
+            updates_df = load_company_updates()
+
+            if updates_df.empty:
+                st.error("No company updates found in data/company_updates.csv.")
+            else:
+                st.subheader("Choose an existing company update")
+
+                update_options = [
+                    f"{int(row.id)} – {row.company} | {row.title}"
+                    for _, row in updates_df.iterrows()
+                ]
+                update_ids = [int(row.id) for _, row in updates_df.iterrows()]
+
+                selected_idx = st.selectbox(
+                    "Select company update",
+                    options=list(range(len(update_options))),
+                    format_func=lambda i: update_options[i],
+                )
+                selected_update_id = update_ids[selected_idx]
+
+                update_row = updates_df[updates_df["id"] == selected_update_id].iloc[0]
+                update = update_row.to_dict()
+
+                render_update_details(update)
+
+                if st.button("Generate draft from update", use_container_width=True):
+                    with st.spinner("Generating draft..."):
+                        generated_update, draft = create_draft(
+                            selected_update_id,
+                            platform.lower(),
+                            tone.lower(),
+                        )
+
+                    if generated_update is None or draft is None:
+                        st.error("Failed to generate draft. Please check the workflow setup.")
+                    else:
+                        st.session_state["current_update"] = generated_update
+                        st.session_state["current_draft"] = draft
+                        st.session_state["research_report"] = None
+                        st.session_state["research_sources"] = []
+                        st.success("Draft generated successfully.")
+
+        else:
+            st.subheader("Manual company research flow")
+
+            st.session_state["company_input"] = st.text_input(
+                "Company name",
+                value=st.session_state.get("company_input", ""),
+                placeholder="Example: Zoho, TCS, OpenAI, Freshworks",
+            )
+
+            st.session_state["company_url"] = st.text_input(
+                "Official company website — optional",
+                value=st.session_state.get("company_url", ""),
+                placeholder="Helps when company names are similar",
+            )
+
+            st.session_state["title_input"] = st.text_input(
+                "Post topic / title",
+                value=st.session_state.get("title_input", ""),
+                placeholder="Example: Product launch, internship update, milestone, hiring post",
+            )
+
+            st.session_state["user_prompt"] = st.text_area(
+                "What should the post say?",
+                value=st.session_state.get("user_prompt", ""),
+                height=160,
+                placeholder=(
+                    "Explain the message, target audience, call to action, "
+                    "and anything that must be included."
+                ),
+            )
+
+            st.session_state["media_notes"] = st.text_area(
+                "Describe the image/video or planned media",
+                value=st.session_state.get("media_notes", ""),
+                height=120,
+                placeholder="Example: Team receiving award on stage, product screenshot, office celebration...",
+            )
+
+            if media_type != "None" and uploaded_file is not None:
+                show_media_preview(uploaded_file, media_type)
+
+            if not HAS_RESEARCH_AGENT:
+                st.warning(
+                    "The research-based generator is not available yet. Create src/research_agent.py first."
+                )
+
+            if st.button("🌐 Research company and generate draft", use_container_width=True):
+                company = st.session_state["company_input"].strip()
+                company_url = st.session_state["company_url"].strip()
+                title = st.session_state["title_input"].strip()
+                user_prompt = st.session_state["user_prompt"].strip()
+                media_notes = st.session_state["media_notes"].strip()
+
+                if not company:
+                    st.error("Please enter a company name.")
+                elif not user_prompt:
+                    st.error("Please describe what the post should communicate.")
+                elif not HAS_RESEARCH_AGENT:
+                    st.error("Add src/research_agent.py before using web research mode.")
+                else:
+                    try:
+                        with st.spinner("Researching company and generating draft..."):
+                            research_result = research_company(
+                                company=company,
+                                user_prompt=user_prompt,
+                                platform=platform,
+                                company_url=company_url or None,
+                            )
+
+                            media_context = media_notes
+                            if uploaded_file is not None:
+                                media_context = (
+                                    f"Uploaded media: {uploaded_file.name} | "
+                                    f"MIME type: {uploaded_file.type}\n{media_notes}"
+                                ).strip()
+
+                            draft = generate_platform_post(
+                                company=company,
+                                platform=platform,
+                                tone=tone,
+                                user_prompt=user_prompt,
+                                research_report=research_result["report"],
+                                media_context=media_context,
+                            )
+
+                        st.session_state["current_update"] = {
+                            "id": None,
+                            "company": company,
+                            "title": title or user_prompt[:60],
+                            "type": "manual",
+                            "body": user_prompt,
+                            "company_url": company_url or None,
+                        }
+                        st.session_state["current_draft"] = draft
+                        st.session_state["research_report"] = research_result["report"]
+                        st.session_state["research_sources"] = research_result["sources"]
+                        st.session_state["media_name"] = uploaded_file.name if uploaded_file else None
+                        st.session_state["media_type"] = uploaded_file.type if uploaded_file else None
+
+                        st.success("Research completed and draft generated.")
+
+                    except Exception as error:
+                        st.error(f"Research or generation failed: {error}")
+
+  
+    with research_tab:
+        st.subheader("Company research")
+
+        report = st.session_state.get("research_report")
+
+        if not report:
+            st.info("Generate a draft first to see the research report.")
+        else:
+            st.write(report)
+
+            sources = st.session_state.get("research_sources", [])
+            if sources:
+                st.markdown("### Sources")
+                for source in sources:
+                    title = source.get("title", "Source")
+                    url = source.get("url", "")
+                    if url:
+                        st.markdown(f"- [{title}]({url})")
+
+    with preview_tab:
+        st.subheader("Generated draft")
+
+        current_draft = st.session_state.get("current_draft")
+
+        if not current_draft:
+            st.info("Generate a draft first.")
+        else:
+            edited_draft = st.text_area(
+                "Review and edit",
+                value=normalize_draft_text(current_draft),
+                height=350,
+                key="edited_draft",
+            )
+
+            status = st.selectbox(
+                "Status",
+                ["draft", "approved", "needs_revision"],
+            )
+
+            if st.button("💾 Save draft to history", use_container_width=True):
+                current_update = st.session_state.get("current_update")
+
+                if not current_update:
+                    st.error("No post metadata found. Generate a draft first.")
+                else:
+                    try:
+                        post_id = save_post(
+                            update_id=current_update.get("id"),
+                            company=current_update.get("company", ""),
+                            title=current_update.get("title", ""),
+                            platform=platform,
+                            draft=edited_draft,
+                            status=status,
+                            publish_mode="web_research" if workflow_mode == "Manual company research" else "old_flow",
+                            tone=tone,
+                            user_prompt=st.session_state.get("user_prompt", ""),
+                            company_url=st.session_state.get("company_url", ""),
+                            research_summary=st.session_state.get("research_report", None),
+                            source_urls=st.session_state.get("research_sources", []),
+                            media_name=st.session_state.get("media_name", None),
+                            media_type=st.session_state.get("media_type", None),
+                            media_notes=st.session_state.get("media_notes", ""),
+                        )
+                        st.session_state["saved_post_id"] = post_id
+                        st.session_state["current_draft"] = edited_draft
+                        st.success(f"Draft saved to history. Post ID: {post_id}")
+                    except TypeError as e:
+                        st.error(f"Save failed due to argument mismatch: {e}")
+                    except Exception as e:
+                        st.error(f"Save failed: {e}")
+
+            if st.button("🔄 Update saved draft text", use_container_width=True):
+                current_update = st.session_state.get("current_update")
+                if not current_update:
+                    st.error("No post selected.")
+                else:
+                    try:
+                        update_draft(
+                            int(st.session_state.get("saved_post_id")),
+                            edited_draft,
+                        )
+                        st.success("Draft updated in history.")
+                    except Exception as e:
+                        st.error(f"Update failed: {e}")
+
+    with history_tab:
+        render_history()
+
+    
+    with publish_tab:
+        st.subheader("Publish to LinkedIn")
+
+        current_update = st.session_state.get("current_update")
+        current_draft = st.session_state.get("current_draft")
+        saved_post_id = st.session_state.get("saved_post_id")
+
+        if not current_update or not current_draft:
+            st.info("Generate and save a draft first.")
+        else:
+            st.write("Ready to publish the current draft.")
+
+            if st.button("🚀 Publish to LinkedIn", use_container_width=True):
+                try:
+                    result = publish_post(
+                        platform="linkedin",
+                        content=normalize_draft_text(current_draft),
+                        company_data=current_update,
+                        post_data=current_update,
+                    )
+
+                    message = result.get("message", "Published successfully.")
+                    st.success(message)
+
+                    if "response" in result:
+                        st.json(result["response"])
+
+                    # Update DB if we have a saved row
+                    if saved_post_id:
+                        try:
+                            update_post_status(
+                                int(saved_post_id),
+                                "published",
+                                published_url=result.get("published_url") or result.get("url"),
+                            )
+                        except Exception:
+                            pass
+
+                except Exception as e:
+                    if saved_post_id:
+                        try:
+                            update_post_status(
+                                int(saved_post_id),
+                                "failed",
+                                error_message=str(e),
+                            )
+                        except Exception:
+                            pass
+                    st.error(str(e))
+
+
+if __name__ == "__main__":
+    main()

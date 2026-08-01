@@ -6,38 +6,52 @@ except Exception:
     generate_social_content = None
 
 
-def generate_fallback_content(update: dict, platform: str, tone: str) -> dict:
-    company = update["company"]
-    title = update["title"]
-    body = update["body"]
-    content_type = update["type"]
+def build_content_brief(update: dict, platform: str, tone: str, user_prompt: str = "") -> dict:
+    return {
+        "company": update.get("company", ""),
+        "title": update.get("title", ""),
+        "body": update.get("body", ""),
+        "content_type": update.get("type", ""),
+        "platform": platform.lower(),
+        "tone": tone.lower(),
+        "user_prompt": (user_prompt or "").strip(),
+    }
 
-    platform = platform.lower()
-    tone = tone.lower()
+
+def generate_fallback_content(update: dict, platform: str, tone: str, user_prompt: str = "") -> dict:
+    company = update.get("company", "")
+    title = update.get("title", "")
+    body = update.get("body", "")
+    content_type = update.get("type", "")
+
+    platform = (platform or "").lower()
+    tone = (tone or "").lower()
+    user_prompt = (user_prompt or "").strip()
 
     if tone == "professional":
         tone_prefix = "We’re pleased to share"
         cta = "What are your thoughts? Share them in the comments."
     elif tone == "friendly":
         tone_prefix = "Excited to share"
-        cta = "Would love to hear what you think."
+        cta = "We’d love to hear what you think."
     else:
         tone_prefix = "We would like to announce"
         cta = "Please share your feedback."
 
-    hook = f"{company} update: {title}"
+    hook = f"{company}: {user_prompt[:70]}" if user_prompt else f"{company}: {title}"
 
     if platform == "linkedin":
         main_post = (
             f"{tone_prefix} an important update from {company}.\n\n"
             f"{body}\n\n"
-            f"This marks another step forward in our journey around {content_type.lower()}."
+            f"This highlights another step forward in {content_type.lower()}.\n\n"
+            f"{cta}"
         )
         caption = f"{company} | {title}"
         hashtags = "#LinkedIn #BusinessUpdate #Innovation #Growth"
 
     elif platform == "twitter":
-        main_post = f"{company}: {title}\n\n{body[:180]}..."
+        main_post = f"{company}: {title}\n\n{body[:220].rstrip()}"
         caption = f"{company} update"
         hashtags = "#Update #Innovation #Tech"
 
@@ -47,7 +61,7 @@ def generate_fallback_content(update: dict, platform: str, tone: str) -> dict:
             f"{body}\n\n"
             f"Stay connected for more updates."
         )
-        caption = f"{title}"
+        caption = title
         hashtags = "#Business #Update #Community"
 
     elif platform == "instagram":
@@ -73,7 +87,7 @@ def generate_fallback_content(update: dict, platform: str, tone: str) -> dict:
     }
 
 
-def create_draft(update_id, platform, tone):
+def create_draft(update_id, platform, tone, user_prompt=""):
     updates_df = load_company_updates()
     row = updates_df[updates_df["id"] == update_id].iloc[0]
 
@@ -85,12 +99,20 @@ def create_draft(update_id, platform, tone):
         "body": row["body"],
     }
 
+    brief = build_content_brief(update, platform, tone, user_prompt)
+
     if generate_social_content is not None:
         try:
-            content_package = generate_social_content(update, platform, tone)
+            content_package = generate_social_content(
+                company_data=update,
+                post_data=brief,
+                platform=platform,
+                tone=tone,
+                use_web_context=True,
+            )
             return update, content_package
         except Exception:
             pass
 
-    content_package = generate_fallback_content(update, platform, tone)
+    content_package = generate_fallback_content(update, platform, tone, user_prompt)
     return update, content_package

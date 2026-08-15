@@ -1,10 +1,20 @@
 import json
 import re
 from typing import List, Dict
-
+import os
 import requests
+
+from groq import Groq
+
+from google import genai
+from google.genai import types
+
 from bs4 import BeautifulSoup
-from openai import OpenAI
+
+from openai import OpenAI  
+
+from dotenv import load_dotenv
+load_dotenv()
 
 try:
     import streamlit as st
@@ -18,20 +28,17 @@ def safe_text(value) -> str:
     return str(value).strip()
 
 
-def get_openai_api_key():
-    if st is not None:
-        try:
-            return st.secrets["OPENAI_API_KEY"]
-        except Exception:
-            pass
-    return None
-
-
-def get_openai_client():
-    api_key = get_openai_api_key()
+def get_groq_client() -> Groq | None:
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        raise ValueError("OPENAI_API_KEY not found in Streamlit secrets")
-    return OpenAI(api_key=api_key)
+        return None
+    return Groq(api_key=api_key)
+
+def get_gemini_client() -> genai.Client | None:
+    api_key = get_gemini_api_key()
+    if not api_key:
+        return None
+    return genai.Client(api_key=api_key)
 
 
 def duckduckgo_search(query: str, max_results: int = 3) -> List[Dict]:
@@ -184,7 +191,27 @@ def generate_social_content(
     tone: str,
     use_web_context: bool = True,
 ) -> dict:
-    client = get_openai_client()
+    """
+    Generate a structured social content package for the given company + post,
+    tailored to a specific platform and tone, optionally using web context.
+
+    Returns a dict with keys: hook, main_post, caption, cta, hashtags.
+    """
+
+    client = get_groq_client()
+    if client is None:
+        # Fallback: if no Groq key, return a simple template rather than crashing
+        return {
+            "hook": f"{company_data.get('company', '')}: {post_data.get('title', '')}",
+            "main_post": (
+                f"We’re pleased to share an update from {company_data.get('company', 'the company')}.\n\n"
+                f"{post_data.get('update', post_data.get('title', ''))}\n\n"
+                "What are your thoughts? Share them in the comments."
+            ),
+            "caption": f"{company_data.get('company', '')} | {post_data.get('title', '')}",
+            "cta": "What are your thoughts? Share them in the comments.",
+            "hashtags": "#LinkedIn #BusinessUpdate #Innovation #Growth",
+        }
 
     web_context = ""
     if use_web_context:
@@ -192,6 +219,14 @@ def generate_social_content(
             web_context = build_web_context(company_data, post_data)
         except Exception:
             web_context = ""
+
+    prompt = build_prompt(
+        company_data=company_data,
+        post_data=post_data,
+        platform=platform,
+        tone=tone,
+        web_context=web_context,
+    )
 
     schema = {
         "type": "object",
@@ -206,35 +241,29 @@ def generate_social_content(
         "additionalProperties": False,
     }
 
-    prompt = build_prompt(
-        company_data=company_data,
-        post_data=post_data,
-        platform=platform,
-        tone=tone,
-        web_context=web_context,
+    schema_instructions = (
+        "Return ONLY valid JSON with exactly these keys: "
+        "hook (string), main_post (string), caption (string), "
+        "cta (string), hashtags (string). "
+        "Do not include markdown formatting, code fences, or any extra text."
     )
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
+    full_prompt = f"{schema_instructions}\n\n{prompt}"
+
+    chat_completion = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",  # or another free Groq model [214][225]
         messages=[
             {
                 "role": "system",
                 "content": "Return only valid JSON that matches the schema.",
             },
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": full_prompt},
         ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "social_content_package",
-                "schema": schema,
-                "strict": True,
-            },
-        },
         temperature=0.7,
     )
 
-    parsed = json.loads(response.choices[0].message.content)
+    raw_content = chat_completion.choices[0].message.content
+    parsed = json.loads(raw_content)
 
     return {
         "hook": safe_text(parsed.get("hook")),

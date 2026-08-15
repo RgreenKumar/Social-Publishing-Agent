@@ -1,37 +1,146 @@
+
 import streamlit as st
 import pandas as pd
+
+from datetime import datetime, time
+from typing import Any, Dict, List, Optional
 
 from src.data_loader import load_company_updates
 from src.workflow import create_draft
 from src.publisher import publish_post
-from src.storage import (
-    init_db,
-    save_post,
-    load_posts,
-    update_draft,
-    update_post_status,
-)
 
 try:
     from src.research_agent import research_company, generate_platform_post
     HAS_RESEARCH_AGENT = True
 except Exception:
     HAS_RESEARCH_AGENT = False
+    research_company = None
+    generate_platform_post = None
+
+from src.storage import (
+    init_db,
+    save_post,
+    load_posts,
+    update_draft,
+    update_post_status,
+    schedule_post,
+    get_statistics,
+)
+# Page setup
+
+st.set_page_config(
+    page_title="AI Social Publishing Agent",
+    page_icon="🚀",
+    layout="wide",
+)
+
+init_db()
+
+# Constants
+
+PLATFORM_LABEL_TO_KEY = {
+    "LinkedIn": "linkedin",
+    "Twitter/X": "twitter",
+    "Facebook": "facebook",
+    "Instagram": "instagram",
+}
+
+PLATFORM_KEY_TO_LABEL = {v: k for k, v in PLATFORM_LABEL_TO_KEY.items()}
+
+RECOMMENDED_POSTING_TIMES = {
+    "LinkedIn": {
+        "label": "Tue–Thu • 9:00–11:00 AM",
+        "time": time(9, 30),
+        "reason": "Professional audiences are usually active mid-morning on weekdays.",
+    },
+    "Twitter/X": {
+        "label": "Mon–Fri • 8:00–10:00 AM",
+        "time": time(8, 30),
+        "reason": "Early weekday mornings often perform well for short updates.",
+    },
+    "Facebook": {
+        "label": "Mon–Fri • 1:00–3:00 PM",
+        "time": time(13, 30),
+        "reason": "Midday posts usually get better community engagement.",
+    },
+    "Instagram": {
+        "label": "Mon–Fri • 6:00–8:00 PM",
+        "time": time(18, 30),
+        "reason": "Evening hours typically work well for visual content.",
+    },
+}
+
+TONE_OPTIONS = [
+    "Professional",
+    "Friendly",
+    "Formal",
+    "Excited",
+    "Marketing",
+    "Neutral",
+]
+
+WORKFLOW_OPTIONS = [
+    "Existing Company Update",
+    "Manual Company Research",
+]
+
+MEDIA_OPTIONS = [
+    "None",
+    "Image",
+    "Video",
+]
+# Session state
+
+DEFAULT_SESSION = {
+    "current_update": None,
+    "current_draft": None,
+    "research_report": "",
+    "research_sources": [],
+    "saved_post_id": None,
+    "selected_platform": "LinkedIn",
+    "selected_tone": "Professional",
+    "company_mode": "Manual Company Research",
+    "company_input": "",
+    "company_url": "",
+    "title_input": "",
+    "user_prompt": "",
+    "media_notes": "",
+    "existing_prompt": "",
+}
+
+for key, value in DEFAULT_SESSION.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
+
+# Helpers
+
+def platform_to_key(platform_label: str) -> str:
+    return PLATFORM_LABEL_TO_KEY.get(platform_label, (platform_label or "").lower())
 
 
-def init_page():
-    st.set_page_config(
-        page_title="Social Publishing Agent",
-        page_icon="📰",
-        layout="wide",
-    )
-    st.title("Social Publishing Agent")
-    st.caption("Draft, review, research, and save social posts across platforms.")
+def platform_to_label(platform_key: str) -> str:
+    return PLATFORM_KEY_TO_LABEL.get(platform_key, platform_key.title() if platform_key else "")
 
+def pretty_status(status: Any) -> str:
+    if status is None:
+        return ""
+    status_text = str(status).strip().lower()
+    icons = {
+        "draft": "📝 Draft",
+        "approved": "✅ Approved",
+        "needs_revision": "🟠 Needs Revision",
+        "scheduled": "📅 Scheduled",
+        "published": "🟢 Published",
+        "failed": "❌ Failed",
+    }
+    return icons.get(status_text, str(status))
 
-def normalize_draft_text(draft):
+def normalize_draft_text(draft: Any) -> str:
     if draft is None:
         return ""
+
+    if isinstance(draft, str):
+        return draft
 
     if isinstance(draft, dict):
         return (
@@ -39,34 +148,39 @@ def normalize_draft_text(draft):
             or draft.get("body")
             or draft.get("text")
             or draft.get("caption")
+            or draft.get("hook")
             or str(draft)
         )
 
     return str(draft)
 
+def get_recommendation(platform_label: str) -> Dict[str, Any]:
+    return RECOMMENDED_POSTING_TIMES.get(
+        platform_label,
+        {
+            "label": "Morning • 9:00–10:00 AM",
+            "time": time(9, 0),
+            "reason": "Morning posts are usually a safe default for business content.",
+        },
+    )
 
-def show_media_preview(uploaded_file, media_type: str):
+
+def show_media_preview(uploaded_file, media_type: str) -> None:
     if uploaded_file is None:
         return
 
-    media_type = (media_type or "").lower()
+    st.subheader("Media Preview")
 
-    if media_type == "image":
-        st.subheader("Media preview")
-        st.image(uploaded_file, caption="Uploaded image", use_container_width=True)
-    elif media_type == "video":
-        st.subheader("Media preview")
+    if media_type == "Image":
+        st.image(uploaded_file, caption=uploaded_file.name, use_container_width=True)
+    elif media_type == "Video":
         st.video(uploaded_file)
     else:
-        st.info("Preview not available for this media type.")
+        st.info("No preview available for this media type.")
 
 
-def render_update_details(update: dict):
-    if not update:
-        st.warning("No update selected.")
-        return
-
-    st.subheader("Selected company update")
+def render_company_update(update: Dict[str, Any]) -> None:
+    st.markdown("### Selected Company Update")
     st.write(f"**Company:** {update.get('company', '')}")
     st.write(f"**Title:** {update.get('title', '')}")
     st.write(f"**Type:** {update.get('type', '')}")
@@ -74,451 +188,698 @@ def render_update_details(update: dict):
     st.write(update.get("body", ""))
 
 
-def render_draft_output(draft):
-    if draft is None:
-        st.info("No draft generated yet.")
+def render_sources(sources: List[Dict[str, Any]]) -> None:
+    if not sources:
+        st.info("No source links were returned.")
         return
 
-    st.subheader("Generated draft")
-
-    if isinstance(draft, dict):
-        main_post = draft.get("main_post") or draft.get("body") or draft.get("text")
-        caption = draft.get("caption")
-        hook = draft.get("hook")
-        hashtags = draft.get("hashtags")
-
-        if hook:
-            st.markdown(f"**Hook:** {hook}")
-        if main_post:
-            st.markdown("**Main post:**")
-            st.write(main_post)
-        if caption:
-            st.markdown("**Caption:**")
-            st.write(caption)
-        if hashtags:
-            st.markdown("**Hashtags:**")
-            st.write(hashtags)
-    else:
-        st.write(draft)
+    st.markdown("### Sources")
+    for source in sources:
+        title = source.get("title", "Source")
+        url = source.get("url", "")
+        if url:
+            st.markdown(f"- [{title}]({url})")
 
 
-def render_history():
-    st.subheader("Post History")
+def fallback_manual_draft(
+    company: str,
+    platform_label: str,
+    tone: str,
+    user_prompt: str,
+    research_report: str = "",
+    media_context: str = "",
+) -> str:
+    tone_value = (tone or "").strip().lower()
+    platform_key = platform_to_key(platform_label)
 
-    try:
-        rows = load_posts()
+    openers = {
+        "professional": "We’re pleased to share",
+        "friendly": "Excited to share",
+        "formal": "We are pleased to announce",
+        "excited": "Excited to share",
+        "marketing": "Introducing",
+        "neutral": "Here is an update from",
+    }
 
-        # load_posts() returns a DataFrame
-        if rows.empty:
-            st.info("No posts have been saved yet.")
-            return
+    ctas = {
+        "linkedin": "What are your thoughts? Share them in the comments.",
+        "twitter": "Stay tuned for more updates.",
+        "facebook": "We would love to hear your thoughts below.",
+        "instagram": "Tell us what you think in the comments.",
+    }
 
-        preferred_columns = [
-            "id",
-            "timestamp",
-            "company",
-            "title",
-            "platform",
-            "tone",
-            "status",
-            "publish_mode",
-            "scheduled_time",
-            "published_url",
-        ]
+    hashtags = {
+        "linkedin": "#LinkedIn #BusinessUpdate #Innovation #Growth",
+        "twitter": "#Update #Innovation #Tech",
+        "facebook": "#Business #Update #Community",
+        "instagram": "#Instagram #BrandUpdate #Innovation #NewLaunch",
+    }
 
-        display_columns = [col for col in preferred_columns if col in rows.columns]
+    opener = openers.get(tone_value, "We would like to share")
+    cta = ctas.get(platform_key, "Share your thoughts with us.")
+    tag_line = hashtags.get(platform_key, "#Update")
 
-        st.dataframe(
-            rows[display_columns],
-            use_container_width=True,
-            hide_index=True,
-        )
+    parts = [
+        f"{opener} an update from {company}.",
+    ]
 
-        st.markdown("### View saved post")
+    if user_prompt.strip():
+        parts.append(user_prompt.strip())
 
-        post_ids = rows["id"].astype(int).tolist()
+    if research_report.strip():
+        parts.append(research_report.strip())
 
-        selected_post_id = st.selectbox(
-            "Select post ID",
-            options=post_ids,
-            key="history_post_id",
-        )
+    if media_context.strip():
+        parts.append(media_context.strip())
 
-        selected_rows = rows[rows["id"] == selected_post_id]
+    parts.append(cta)
+    parts.append(tag_line)
 
-        if selected_rows.empty:
-            return
-
-        selected_post = selected_rows.iloc[0]
-
-        with st.expander(f"Post #{selected_post_id}", expanded=True):
-            st.markdown(f"**Company:** {selected_post.get('company', '')}")
-            st.markdown(f"**Platform:** {selected_post.get('platform', '')}")
-            st.markdown(f"**Status:** {selected_post.get('status', '')}")
-
-            st.text_area(
-                "Saved draft",
-                value=str(selected_post.get("draft", "")),
-                height=250,
-                disabled=True,
-                key=f"saved_draft_{selected_post_id}",
-            )
-
-            research = selected_post.get("research_summary", None)
-            if research and not pd.isna(research):
-                st.markdown("#### Research report")
-                st.write(research)
-
-            published_url = selected_post.get("published_url", None)
-            if published_url and not pd.isna(published_url):
-                st.link_button("Open published post", published_url)
-
-    except Exception as error:
-        st.error(f"Unable to load history: {error}")
+    return "\n\n".join(parts)
 
 
-def main():
-    init_db()
-    init_page()
+def build_save_kwargs(
+    current_update: Dict[str, Any],
+    edited_draft: str,
+    status: str,
+    platform_label: str,
+    tone: str,
+    research_report: str,
+    research_sources: List[Dict[str, Any]],
+    media_type: str,
+    media_name: Optional[str],
+    media_notes: str,
+    company_mode: str,
+    user_prompt: str,
+    company_url: str,
+) -> Dict[str, Any]:
+    platform_key = platform_to_key(platform_label)
 
-    # session defaults
-    st.session_state.setdefault("current_update", None)
-    st.session_state.setdefault("current_draft", None)
-    st.session_state.setdefault("research_report", None)
-    st.session_state.setdefault("research_sources", [])
-    st.session_state.setdefault("saved_post_id", None)
-    st.session_state.setdefault("company_input", "")
-    st.session_state.setdefault("company_url", "")
-    st.session_state.setdefault("title_input", "")
-    st.session_state.setdefault("user_prompt", "")
-    st.session_state.setdefault("media_notes", "")
-    st.session_state.setdefault("media_name", None)
-    st.session_state.setdefault("media_type", None)
+    return {
+        "update_id": current_update.get("id"),
+        "company": current_update.get("company", ""),
+        "title": current_update.get("title", ""),
+        "platform": platform_key,
+        "draft": edited_draft,
+        "status": status,
+        "publish_mode": "manual_research"
+        if company_mode == "Manual Company Research"
+        else "existing_update",
+        "tone": tone,
+        "user_prompt": user_prompt,
+        "company_url": company_url,
+        "research_summary": research_report,
+        "source_urls": research_sources,
+        "media_name": media_name,
+        "media_type": media_type if media_type != "None" else None,
+        "media_notes": media_notes,
+    }
 
-    # Sidebar settings
-    st.sidebar.header("Draft settings")
 
-    workflow_mode = st.sidebar.radio(
-        "Workflow mode",
-        ["Manual company research", "Existing company updates"],
-        index=0,
+def ensure_current_context() -> bool:
+    return bool(st.session_state.get("current_update") and st.session_state.get("current_draft"))
+
+# Page header
+
+st.title("🤖 AI Social Publishing Agent")
+st.caption("Generate, research, edit, save, schedule, and publish social posts.")
+
+# Sidebar
+
+with st.sidebar:
+    st.header("Settings")
+
+    st.session_state["company_mode"] = st.radio(
+        "Company Source",
+        WORKFLOW_OPTIONS,
+        index=WORKFLOW_OPTIONS.index(st.session_state.get("company_mode", "Manual Company Research"))
+        if st.session_state.get("company_mode", "Manual Company Research") in WORKFLOW_OPTIONS
+        else 0,
     )
 
-    platform = st.sidebar.selectbox(
+    selected_platform = st.selectbox(
         "Platform",
-        ["LinkedIn", "Twitter/X", "Facebook", "Instagram"],
+        list(PLATFORM_LABEL_TO_KEY.keys()),
+        index=list(PLATFORM_LABEL_TO_KEY.keys()).index(
+            st.session_state.get("selected_platform", "LinkedIn")
+        )
+        if st.session_state.get("selected_platform", "LinkedIn") in PLATFORM_LABEL_TO_KEY
+        else 0,
     )
 
-    tone = st.sidebar.selectbox(
+    selected_tone = st.selectbox(
         "Tone",
-        ["Professional", "Friendly", "Neutral", "Confident", "Celebratory"],
+        TONE_OPTIONS,
+        index=TONE_OPTIONS.index(st.session_state.get("selected_tone", "Professional"))
+        if st.session_state.get("selected_tone", "Professional") in TONE_OPTIONS
+        else 0,
     )
 
-    media_type = st.sidebar.selectbox(
-        "Media type",
-        ["None", "Image", "Video"],
-    )
+    st.session_state["selected_platform"] = selected_platform
+    st.session_state["selected_tone"] = selected_tone
 
-    uploaded_file = None
+    st.divider()
+
+    media_type = st.selectbox("Media Type", MEDIA_OPTIONS)
+    uploaded_media = None
     if media_type != "None":
-        uploaded_file = st.sidebar.file_uploader(
+        uploaded_media = st.file_uploader(
             "Upload media",
             type=["png", "jpg", "jpeg", "webp", "mp4", "mov", "avi"],
         )
 
-    # Tabs
-    create_tab, research_tab, preview_tab, history_tab, publish_tab = st.tabs(
-        ["✍️ Create Post", "🌐 Research", "📝 Draft Preview", "📚 History", "🚀 Publish"]
+    if uploaded_media is not None:
+        show_media_preview(uploaded_media, media_type)
+
+# Dashboard metrics
+
+stats_df = get_statistics()
+counts = {"draft": 0, "scheduled": 0, "published": 0, "failed": 0}
+
+if not stats_df.empty and "status" in stats_df.columns and "total" in stats_df.columns:
+    for _, row in stats_df.iterrows():
+        counts[str(row["status"]).strip().lower()] = int(row["total"])
+
+all_posts_df = load_posts()
+total_posts = int(len(all_posts_df)) if isinstance(all_posts_df, pd.DataFrame) else 0
+
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Total Posts", total_posts)
+c2.metric("Drafts", counts.get("draft", 0))
+c3.metric("Scheduled", counts.get("scheduled", 0))
+c4.metric("Published", counts.get("published", 0))
+c5.metric("Failed", counts.get("failed", 0))
+
+st.markdown("---")
+
+# Tabs
+
+dashboard_tab, create_tab, research_tab, preview_tab, history_tab, publish_tab = st.tabs(
+    [
+        "📊 Dashboard",
+        "✍ Create Post",
+        "🔍 Research",
+        "📝 Preview",
+        "📚 History",
+        "🚀 Publish",
+    ]
+)
+
+# Dashboard Tab
+
+with dashboard_tab:
+    st.subheader("Overview")
+
+    st.write(
+        "Use the Create Post tab to generate drafts using either your existing company updates or manual web research."
     )
 
-    with create_tab:
-        if workflow_mode == "Existing company updates":
-            updates_df = load_company_updates()
+    st.markdown("### Recommended Posting Time")
+    recommendation = get_recommendation(st.session_state["selected_platform"])
+    st.success(
+        f"{st.session_state['selected_platform']}: {recommendation['label']}"
+    )
+    st.caption(recommendation["reason"])
 
-            if updates_df.empty:
-                st.error("No company updates found in data/company_updates.csv.")
-            else:
-                st.subheader("Choose an existing company update")
+    st.markdown("### Recent Posts")
+    recent_df = load_posts(limit=5)
+    if recent_df.empty:
+        st.info("No posts yet.")
+    else:
+        recent_display = recent_df.copy()
+        if "platform" in recent_display.columns:
+            recent_display["platform"] = recent_display["platform"].apply(platform_to_label)
+        if "status" in recent_display.columns:
+            recent_display["status"] = recent_display["status"].apply(pretty_status)
+        columns_to_show = [
+            col for col in [
+                "id", "timestamp", "company", "title", "platform", "status", "published_url"
+            ] if col in recent_display.columns
+        ]
+        st.dataframe(
+            recent_display[columns_to_show],
+            use_container_width=True,
+            hide_index=True,
+        )
 
-                update_options = [
-                    f"{int(row.id)} – {row.company} | {row.title}"
-                    for _, row in updates_df.iterrows()
-                ]
-                update_ids = [int(row.id) for _, row in updates_df.iterrows()]
+# Create Tab
 
-                selected_idx = st.selectbox(
-                    "Select company update",
-                    options=list(range(len(update_options))),
-                    format_func=lambda i: update_options[i],
-                )
-                selected_update_id = update_ids[selected_idx]
+with create_tab:
+    st.subheader("Create a Draft")
 
-                update_row = updates_df[updates_df["id"] == selected_update_id].iloc[0]
-                update = update_row.to_dict()
+    if st.session_state["company_mode"] == "Existing Company Update":
+        updates_df = load_company_updates()
 
-                render_update_details(update)
+        if updates_df.empty:
+            st.error("No company updates found in data/company_updates.csv.")
+        else:
+            update_options = [
+                f"{int(row.id)} | {row.company} | {row.title}"
+                for _, row in updates_df.iterrows()
+            ]
 
-                if st.button("Generate draft from update", use_container_width=True):
+            selected_index = st.selectbox(
+                "Choose a company update",
+                range(len(update_options)),
+                format_func=lambda i: update_options[i],
+                key="existing_update_index",
+            )
+
+            selected_row = updates_df.iloc[selected_index]
+            selected_update = selected_row.to_dict()
+
+            render_company_update(selected_update)
+
+            extra_prompt = st.text_area(
+                "Optional extra instructions",
+                value=st.session_state.get("existing_prompt", ""),
+                placeholder="Example: Make it more engaging and concise.",
+                height=100,
+                key="existing_prompt_widget",
+            )
+
+            if st.button("🤖 Generate Draft from Update", use_container_width=True):
+                try:
                     with st.spinner("Generating draft..."):
-                        generated_update, draft = create_draft(
-                            selected_update_id,
-                            platform.lower(),
-                            tone.lower(),
+                        update, draft = create_draft(
+                            int(selected_update["id"]),
+                            platform_to_key(st.session_state["selected_platform"]),
+                            st.session_state["selected_tone"].lower(),
+                            extra_prompt.strip(),
                         )
 
-                    if generated_update is None or draft is None:
-                        st.error("Failed to generate draft. Please check the workflow setup.")
-                    else:
-                        st.session_state["current_update"] = generated_update
-                        st.session_state["current_draft"] = draft
-                        st.session_state["research_report"] = None
-                        st.session_state["research_sources"] = []
-                        st.success("Draft generated successfully.")
+                    st.session_state["current_update"] = update
+                    st.session_state["current_draft"] = draft
+                    st.session_state["research_report"] = ""
+                    st.session_state["research_sources"] = []
+                    st.success("Draft generated successfully.")
+                except Exception as exc:
+                    st.error(f"Draft generation failed: {exc}")
 
-        else:
-            st.subheader("Manual company research flow")
+    else:
+        st.subheader("Manual Company Research")
 
-            st.session_state["company_input"] = st.text_input(
-                "Company name",
-                value=st.session_state.get("company_input", ""),
-                placeholder="Example: Zoho, TCS, OpenAI, Freshworks",
-            )
+        company_name = st.text_input(
+            "Company name",
+            value=st.session_state.get("company_input", ""),
+            placeholder="Example: Zoho, TCS, OpenAI, Freshworks",
+            key="company_input_widget",
+        )
 
-            st.session_state["company_url"] = st.text_input(
-                "Official company website — optional",
-                value=st.session_state.get("company_url", ""),
-                placeholder="Helps when company names are similar",
-            )
+        company_url = st.text_input(
+            "Official website (optional)",
+            value=st.session_state.get("company_url", ""),
+            placeholder="Example: https://company.com",
+            key="company_url_widget",
+        )
 
-            st.session_state["title_input"] = st.text_input(
-                "Post topic / title",
-                value=st.session_state.get("title_input", ""),
-                placeholder="Example: Product launch, internship update, milestone, hiring post",
-            )
+        title_input = st.text_input(
+            "Post title / topic",
+            value=st.session_state.get("title_input", ""),
+            placeholder="Example: New product launch",
+            key="title_input_widget",
+        )
 
-            st.session_state["user_prompt"] = st.text_area(
-                "What should the post say?",
-                value=st.session_state.get("user_prompt", ""),
-                height=160,
-                placeholder=(
-                    "Explain the message, target audience, call to action, "
-                    "and anything that must be included."
-                ),
-            )
+        user_prompt = st.text_area(
+            "What should the post communicate?",
+            value=st.session_state.get("user_prompt", ""),
+            placeholder="Describe the goal, audience, key points, and call to action.",
+            height=160,
+            key="user_prompt_widget",
+        )
 
-            st.session_state["media_notes"] = st.text_area(
-                "Describe the image/video or planned media",
-                value=st.session_state.get("media_notes", ""),
-                height=120,
-                placeholder="Example: Team receiving award on stage, product screenshot, office celebration...",
-            )
+        media_notes = st.text_area(
+            "Describe the media or visual context",
+            value=st.session_state.get("media_notes", ""),
+            placeholder="Example: Team celebration photo, office milestone video, product screenshot.",
+            height=100,
+            key="media_notes_widget",
+        )
 
-            if media_type != "None" and uploaded_file is not None:
-                show_media_preview(uploaded_file, media_type)
+        if st.button("🔍 Research & Generate", use_container_width=True):
+            company_name = company_name.strip()
+            company_url = company_url.strip()
+            title_input = title_input.strip()
+            user_prompt = user_prompt.strip()
+            media_notes = media_notes.strip()
 
-            if not HAS_RESEARCH_AGENT:
-                st.warning(
-                    "The research-based generator is not available yet. Create src/research_agent.py first."
-                )
+            if not company_name:
+                st.error("Please enter a company name.")
+            elif not user_prompt:
+                st.error("Please describe what the post should communicate.")
+            else:
+                try:
+                    with st.spinner("Researching company and generating draft..."):
+                        media_context = media_notes
+                        if uploaded_media is not None:
+                            media_context = (
+                                f"Uploaded {media_type.lower()}: {uploaded_media.name}. "
+                                f"{media_context}"
+                            ).strip()
 
-            if st.button("🌐 Research company and generate draft", use_container_width=True):
-                company = st.session_state["company_input"].strip()
-                company_url = st.session_state["company_url"].strip()
-                title = st.session_state["title_input"].strip()
-                user_prompt = st.session_state["user_prompt"].strip()
-                media_notes = st.session_state["media_notes"].strip()
-
-                if not company:
-                    st.error("Please enter a company name.")
-                elif not user_prompt:
-                    st.error("Please describe what the post should communicate.")
-                elif not HAS_RESEARCH_AGENT:
-                    st.error("Add src/research_agent.py before using web research mode.")
-                else:
-                    try:
-                        with st.spinner("Researching company and generating draft..."):
-                            research_result = research_company(
-                                company=company,
+                        if HAS_RESEARCH_AGENT:
+                            research = research_company(
+                                company=company_name,
                                 user_prompt=user_prompt,
-                                platform=platform,
+                                platform=st.session_state["selected_platform"],
                                 company_url=company_url or None,
                             )
-
-                            media_context = media_notes
-                            if uploaded_file is not None:
-                                media_context = (
-                                    f"Uploaded media: {uploaded_file.name} | "
-                                    f"MIME type: {uploaded_file.type}\n{media_notes}"
-                                ).strip()
-
+                            research_report = research.get("report", "")
+                            research_sources = research.get("sources", [])
                             draft = generate_platform_post(
-                                company=company,
-                                platform=platform,
-                                tone=tone,
+                                company=company_name,
+                                platform=st.session_state["selected_platform"],
+                                tone=st.session_state["selected_tone"],
                                 user_prompt=user_prompt,
-                                research_report=research_result["report"],
+                                research_report=research_report,
+                                media_context=media_context,
+                            )
+                        else:
+                            research_report = (
+                                "OpenAI research module is not available in this environment. "
+                                "A fallback draft has been created locally."
+                            )
+                            research_sources = []
+                            draft = fallback_manual_draft(
+                                company=company_name,
+                                platform_label=st.session_state["selected_platform"],
+                                tone=st.session_state["selected_tone"],
+                                user_prompt=user_prompt,
+                                research_report=research_report,
                                 media_context=media_context,
                             )
 
-                        st.session_state["current_update"] = {
-                            "id": None,
-                            "company": company,
-                            "title": title or user_prompt[:60],
-                            "type": "manual",
-                            "body": user_prompt,
-                            "company_url": company_url or None,
-                        }
-                        st.session_state["current_draft"] = draft
-                        st.session_state["research_report"] = research_result["report"]
-                        st.session_state["research_sources"] = research_result["sources"]
-                        st.session_state["media_name"] = uploaded_file.name if uploaded_file else None
-                        st.session_state["media_type"] = uploaded_file.type if uploaded_file else None
+                    st.session_state["current_update"] = {
+                        "id": None,
+                        "company": company_name,
+                        "title": title_input or user_prompt[:60],
+                        "type": "manual",
+                        "body": user_prompt,
+                        "company_url": company_url or None,
+                    }
+                    st.session_state["current_draft"] = draft
+                    st.session_state["research_report"] = research_report
+                    st.session_state["research_sources"] = research_sources
+                    st.session_state["company_input"] = company_name
+                    st.session_state["company_url"] = company_url
+                    st.session_state["title_input"] = title_input
+                    st.session_state["user_prompt"] = user_prompt
+                    st.session_state["media_notes"] = media_notes
+                    st.success("Research completed and draft generated.")
+                except Exception as exc:
+                    fallback_report = f"Research failed: {exc}"
+                    st.session_state["research_report"] = fallback_report
+                    st.session_state["research_sources"] = []
+                    st.session_state["current_update"] = {
+                        "id": None,
+                        "company": company_name,
+                        "title": title_input or user_prompt[:60],
+                        "type": "manual",
+                        "body": user_prompt,
+                        "company_url": company_url or None,
+                    }
+                    st.session_state["current_draft"] = fallback_manual_draft(
+                        company=company_name,
+                        platform_label=st.session_state["selected_platform"],
+                        tone=st.session_state["selected_tone"],
+                        user_prompt=user_prompt,
+                        research_report=fallback_report,
+                        media_context=media_notes,
+                    )
+                    st.error(f"Research or generation failed: {exc}")
 
-                        st.success("Research completed and draft generated.")
+# Research Tab
 
-                    except Exception as error:
-                        st.error(f"Research or generation failed: {error}")
+with research_tab:
+    st.subheader("Research Report")
 
-  
-    with research_tab:
-        st.subheader("Company research")
+    report = st.session_state.get("research_report", "")
 
-        report = st.session_state.get("research_report")
+    if not report:
+        st.info("Generate a draft first to see the research report.")
+    else:
+        st.write(report)
+        render_sources(st.session_state.get("research_sources", []))
 
-        if not report:
-            st.info("Generate a draft first to see the research report.")
-        else:
-            st.write(report)
+# Preview Tab
 
-            sources = st.session_state.get("research_sources", [])
-            if sources:
-                st.markdown("### Sources")
-                for source in sources:
-                    title = source.get("title", "Source")
-                    url = source.get("url", "")
-                    if url:
-                        st.markdown(f"- [{title}]({url})")
+with preview_tab:
+    st.subheader("Draft Preview")
 
-    with preview_tab:
-        st.subheader("Generated draft")
+    current_draft = st.session_state.get("current_draft")
 
-        current_draft = st.session_state.get("current_draft")
+    if not current_draft:
+        st.info("Generate a draft first.")
+    else:
+        edited_draft = st.text_area(
+            "Review and edit your draft",
+            value=normalize_draft_text(current_draft),
+            height=360,
+            key="draft_editor",
+        )
 
-        if not current_draft:
-            st.info("Generate a draft first.")
-        else:
-            edited_draft = st.text_area(
-                "Review and edit",
-                value=normalize_draft_text(current_draft),
-                height=350,
-                key="edited_draft",
-            )
+        status = st.selectbox(
+            "Status",
+            ["draft", "approved", "needs_revision"],
+            index=0,
+            key="draft_status",
+        )
 
-            status = st.selectbox(
-                "Status",
-                ["draft", "approved", "needs_revision"],
-            )
+        col_a, col_b = st.columns(2)
 
-            if st.button("💾 Save draft to history", use_container_width=True):
-                current_update = st.session_state.get("current_update")
-
-                if not current_update:
-                    st.error("No post metadata found. Generate a draft first.")
-                else:
-                    try:
-                        post_id = save_post(
-                            update_id=current_update.get("id"),
-                            company=current_update.get("company", ""),
-                            title=current_update.get("title", ""),
-                            platform=platform,
-                            draft=edited_draft,
+        with col_a:
+            if st.button("💾 Save to History", use_container_width=True):
+                current_update = st.session_state.get("current_update") or {}
+                try:
+                    post_id = save_post(
+                        **build_save_kwargs(
+                            current_update=current_update,
+                            edited_draft=edited_draft,
                             status=status,
-                            publish_mode="web_research" if workflow_mode == "Manual company research" else "old_flow",
-                            tone=tone,
+                            platform_label=st.session_state["selected_platform"],
+                            tone=st.session_state["selected_tone"],
+                            research_report=st.session_state.get("research_report", ""),
+                            research_sources=st.session_state.get("research_sources", []),
+                            media_type=media_type,
+                            media_name=uploaded_media.name if uploaded_media else None,
+                            media_notes=st.session_state.get("media_notes", ""),
+                            company_mode=st.session_state["company_mode"],
                             user_prompt=st.session_state.get("user_prompt", ""),
                             company_url=st.session_state.get("company_url", ""),
-                            research_summary=st.session_state.get("research_report", None),
-                            source_urls=st.session_state.get("research_sources", []),
-                            media_name=st.session_state.get("media_name", None),
-                            media_type=st.session_state.get("media_type", None),
-                            media_notes=st.session_state.get("media_notes", ""),
                         )
-                        st.session_state["saved_post_id"] = post_id
-                        st.session_state["current_draft"] = edited_draft
-                        st.success(f"Draft saved to history. Post ID: {post_id}")
-                    except TypeError as e:
-                        st.error(f"Save failed due to argument mismatch: {e}")
-                    except Exception as e:
-                        st.error(f"Save failed: {e}")
+                    )
+                    st.session_state["saved_post_id"] = post_id
+                    st.session_state["current_draft"] = edited_draft
+                    st.success(f"Draft saved successfully. Post ID: {post_id}")
+                except Exception as exc:
+                    st.error(f"Save failed: {exc}")
 
-            if st.button("🔄 Update saved draft text", use_container_width=True):
-                current_update = st.session_state.get("current_update")
-                if not current_update:
-                    st.error("No post selected.")
+        with col_b:
+            if st.button("🔄 Update Saved Draft", use_container_width=True):
+                saved_post_id = st.session_state.get("saved_post_id")
+                if saved_post_id is None:
+                    st.error("Save the draft first before updating it.")
                 else:
                     try:
-                        update_draft(
-                            int(st.session_state.get("saved_post_id")),
-                            edited_draft,
-                        )
-                        st.success("Draft updated in history.")
-                    except Exception as e:
-                        st.error(f"Update failed: {e}")
+                        update_draft(int(saved_post_id), edited_draft)
+                        st.session_state["current_draft"] = edited_draft
+                        st.success("Saved draft updated successfully.")
+                    except Exception as exc:
+                        st.error(f"Update failed: {exc}")
 
-    with history_tab:
-        render_history()
+        if st.session_state.get("saved_post_id") is not None:
+            st.caption(f"Saved post ID: {st.session_state['saved_post_id']}")
 
-    
-    with publish_tab:
-        st.subheader("Publish to LinkedIn")
+# History Tab
 
-        current_update = st.session_state.get("current_update")
-        current_draft = st.session_state.get("current_draft")
-        saved_post_id = st.session_state.get("saved_post_id")
+with history_tab:
+    st.subheader("Saved Posts")
 
-        if not current_update or not current_draft:
-            st.info("Generate and save a draft first.")
-        else:
-            st.write("Ready to publish the current draft.")
+    rows = load_posts()
 
-            if st.button("🚀 Publish to LinkedIn", use_container_width=True):
+    if rows.empty:
+        st.info("No posts have been saved yet.")
+    else:
+        display_rows = rows.copy()
+
+        if "platform" in display_rows.columns:
+            display_rows["platform"] = display_rows["platform"].apply(platform_to_label)
+
+        if "status" in display_rows.columns:
+            display_rows["status"] = display_rows["status"].apply(pretty_status)
+
+        display_columns = [
+            col for col in [
+                "id",
+                "timestamp",
+                "company",
+                "title",
+                "platform",
+                "tone",
+                "status",
+                "scheduled_time",
+                "recommended_time",
+                "published_url",
+            ] if col in display_rows.columns
+        ]
+
+        st.dataframe(
+            display_rows[display_columns],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("### View Post Details")
+
+        post_ids = rows["id"].astype(int).tolist()
+        selected_post_id = st.selectbox(
+            "Select post ID",
+            options=post_ids,
+            key="history_post_selector",
+        )
+
+        selected_row = rows[rows["id"] == selected_post_id]
+        if not selected_row.empty:
+            selected_post = selected_row.iloc[0].to_dict()
+
+            with st.expander(f"Post #{selected_post_id}", expanded=True):
+                st.write(f"**Company:** {selected_post.get('company', '')}")
+                st.write(f"**Title:** {selected_post.get('title', '')}")
+                st.write(f"**Platform:** {platform_to_label(selected_post.get('platform', ''))}")
+                st.write(f"**Status:** {pretty_status(selected_post.get('status', ''))}")
+                st.write(f"**Publish Mode:** {selected_post.get('publish_mode', '')}")
+
+                if selected_post.get("scheduled_time"):
+                    st.write(f"**Scheduled Time:** {selected_post.get('scheduled_time')}")
+
+                if selected_post.get("recommended_time"):
+                    st.write(f"**Recommended Time:** {selected_post.get('recommended_time')}")
+
+                if selected_post.get("draft"):
+                    st.markdown("**Saved Draft**")
+                    st.text_area(
+                        "Draft",
+                        value=str(selected_post.get("draft", "")),
+                        height=240,
+                        disabled=True,
+                        key=f"history_draft_{selected_post_id}",
+                    )
+
+                if selected_post.get("research_summary"):
+                    st.markdown("**Research Summary**")
+                    st.write(selected_post.get("research_summary"))
+
+                if selected_post.get("published_url"):
+                    st.link_button(
+                        "Open Published Post",
+                        selected_post.get("published_url"),
+                    )
+# Publish Tab
+with publish_tab:
+    st.subheader("Publish & Schedule")
+
+    current_update = st.session_state.get("current_update")
+    current_draft = st.session_state.get("current_draft")
+    saved_post_id = st.session_state.get("saved_post_id")
+
+    if not current_update or not current_draft:
+        st.info("Generate and save a draft first.")
+    else:
+        # selected_platform is stored as a KEY, so we derive the label from it
+        selected_platform_key = st.session_state.get("selected_platform", "linkedin")
+        selected_platform_label = platform_to_label(selected_platform_key)
+
+        recommendation = get_recommendation(selected_platform_label)
+
+        publish_mode = st.radio(
+            "Publishing Mode",
+            ["Publish Now", "Schedule Post"],
+            horizontal=True,
+            key="publish_mode_radio",
+        )
+
+        st.markdown("---")
+
+        if publish_mode == "Publish Now":
+            st.info(f"This will publish to {selected_platform_label} immediately.")
+
+            if st.button(f"🚀 Publish to {selected_platform_label}", use_container_width=True):
                 try:
+                    # Build post_data including media info if available
+                    post_data = dict(current_update)  # copy so we can add extra fields
+
+                    # Only attach image bytes for image media type
+                    if uploaded_media is not None and media_type == "Image":
+                        post_data["image_bytes"] = uploaded_media.read()
+                        post_data["image_filename"] = uploaded_media.name
+                        post_data["media_type"] = media_type
+
                     result = publish_post(
-                        platform="linkedin",
+                        platform=selected_platform_key,
                         content=normalize_draft_text(current_draft),
+                        post_data=post_data,
                         company_data=current_update,
-                        post_data=current_update,
                     )
 
                     message = result.get("message", "Published successfully.")
                     st.success(message)
 
-                    if "response" in result:
+                    if result.get("response") is not None:
                         st.json(result["response"])
 
-                    # Update DB if we have a saved row
-                    if saved_post_id:
+                    published_url = result.get("published_url") or result.get("url")
+
+                    if saved_post_id is not None:
+                        update_post_status(
+                            int(saved_post_id),
+                            status="published",
+                            published_url=published_url,
+                            publish_mode="published",
+                        )
+
+                except Exception as exc:
+                    if saved_post_id is not None:
                         try:
                             update_post_status(
                                 int(saved_post_id),
-                                "published",
-                                published_url=result.get("published_url") or result.get("url"),
+                                status="failed",
+                                error_message=str(exc),
                             )
                         except Exception:
                             pass
+                    st.error(f"Publish failed: {exc}")
 
-                except Exception as e:
-                    if saved_post_id:
-                        try:
-                            update_post_status(
-                                int(saved_post_id),
-                                "failed",
-                                error_message=str(e),
-                            )
-                        except Exception:
-                            pass
-                    st.error(str(e))
+            else:
+              st.info("Choose a future date and time for automatic publishing.")
+              st.caption(
+                f"Recommended: {recommendation['label']} — {recommendation['reason']}"
+            )
 
+              col1, col2 = st.columns(2)
+              with col1:
+                 schedule_date = st.date_input("Schedule Date", value=datetime.now().date())
+              with col2:
+                 schedule_time = st.time_input("Schedule Time", value=recommendation["time"])
 
-if __name__ == "__main__":
-    main()
+              scheduled_datetime = datetime.combine(schedule_date, schedule_time)
+
+              st.success(
+                 f"Scheduled for: {scheduled_datetime.strftime('%d %b %Y %I:%M %p')}"
+            )
+
+              if st.button("📅 Schedule Post", use_container_width=True):
+                 if saved_post_id is None:
+                     st.error("Please save the draft first before scheduling.")
+                 else:
+                    try:
+                        schedule_post(
+                            int(saved_post_id),
+                            scheduled_datetime.strftime("%Y-%m-%d %H:%M:%S"),
+                            recommended_time=recommendation["label"],
+                        )
+                        st.success("Post scheduled successfully.")
+                    except Exception as exc:
+                        st.error(f"Scheduling failed: {exc}")
+
+st.markdown("---")
+st.caption("Built with Streamlit, SQLite, and AI-assisted workflows.")

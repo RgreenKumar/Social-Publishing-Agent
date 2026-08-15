@@ -3,6 +3,10 @@ from src.platform_adapters.twitter_adapter import publish_twitter_post
 from src.platform_adapters.facebook_adapter import publish_facebook_post
 from src.platform_adapters.instagram_adapter import publish_instagram_post
 
+import os
+
+print("TOKEN:", os.getenv("LINKEDIN_ACCESS_TOKEN"))
+print("URN:", os.getenv("LINKEDIN_PERSON_URN"))
 
 PLATFORM_ALIASES = {
     "linkedin": "linkedin",

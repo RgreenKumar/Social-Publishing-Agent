@@ -10,7 +10,5 @@ env/
 .idea/
 .vscode/
 .streamlit/secrets.toml
-.streamlit/
-src/.streamlit/
 .DS_Store
 .pytest_cache/

@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+
 import pandas as pd
 
 
@@ -460,6 +461,40 @@ def get_statistics() -> pd.DataFrame:
             conn,
         )
 
+def schedule_post(
+    post_id: int,
+    scheduled_time: str,
+    recommended_time: str | None = None,
+) -> bool:
+
+    with get_connection() as conn:
+
+        cursor = conn.execute(
+            """
+            UPDATE posts
+            SET
+
+                status=?,
+
+                scheduled_time=?,
+
+                recommended_time=?,
+
+                updated_at=?
+
+            WHERE id=?
+            """,
+
+            (
+                "scheduled",
+                scheduled_time,
+                recommended_time,
+                current_timestamp(),
+                post_id,
+            ),
+        )
+
+        return cursor.rowcount > 0
 
 # Create and migrate the database when imported.
 init_db()

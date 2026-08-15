@@ -1,117 +1,304 @@
-# Social Publishing Agent MVP
+# AI Social Publishing Agent
 
-## Overview
-Social Publishing Agent MVP is a prototype application that converts company-style updates into social media post drafts. It demonstrates an end-to-end AI-assisted publishing workflow using public sample data, human approval, and status tracking.
+AI Social Publishing Agent is a Streamlit-based application that turns structured company updates and manual research into platform-ready social media posts. It combines CSV data loading, AI-assisted copy generation, media previews, research workflows, scheduling, and SQLite-backed history tracking in a single dashboard.
 
-This project was built as a prototype, not as a production system. The current version focuses on showing the core workflow clearly and can later be extended with real company data and live social platform integrations.
+## Table of Contents
+
+- [Features](#features)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Running the App](#running-the-app)
+- [Using the App](#using-the-app)
+  - [Dashboard](#dashboard)
+  - [Create Post](#create-post)
+  - [Research](#research)
+  - [Preview & Save](#preview--save)
+  - [History](#history)
+  - [Publish & Schedule](#publish--schedule)
+- [Data & Storage](#data--storage)
+- [Development Notes](#development-notes)
+- [Troubleshooting](#troubleshooting)
 
 ## Features
-- Select a company-style update from sample CSV data
-- Generate a social media draft for platforms like LinkedIn, Twitter, and Facebook
-- Choose platform and tone
-- Review the generated draft before publishing
-- Approve or reject the draft
-- Store publishing history in SQLite
-- Export post history as CSV
-- Use fallback mock generation if live API quota is unavailable
 
-## Workflow
-1. Select a sample company update
-2. Choose target platform and tone
-3. Generate a draft post
-4. Review the generated content
-5. Approve or reject the draft
-6. Save the final status in the history log
+- Generate social media drafts for LinkedIn, Twitter/X, Facebook, and Instagram.
+- Two content workflows:
+  - **Existing Company Update**: use rows from `data/company_updates.csv`.
+  - **Manual Company Research**: describe the company and desired post; optionally use a research agent.
+- Built-in tone control: Professional, Friendly, Formal, Excited, Marketing, Neutral.
+- Optional AI-powered research step for richer context and source links.
+- Media handling with image/video upload and preview.
+- Draft editing with status labels (Draft, Approved, Needs Revision).
+- SQLite-backed history: save, update, and inspect past posts.
+- Basic analytics: total posts and counts by status.
+- Scheduling and one-click publishing helper for your platform integration.
 
 ## Tech Stack
-- Python
-- Streamlit
-- Pandas
-- SQLite
-- python-dotenv
-- OpenAI API (with mock fallback)
-- Requests
+
+- **Frontend**: [Streamlit](https://streamlit.io/) for the interactive dashboard.
+- **Language**: Python 3.
+- **Data**: CSV for company updates.
+- **Database**: SQLite (`data/post_history.db`).
+- **AI/LLM**: `src/llm_agent.py` and optional `src/research_agent.py` (implementation depends on your environment).
 
 ## Project Structure
+
 ```text
-social-publishing-agent/
-├── app.py
-├── config.py
-├── .env
-├── README.md
-├── requirements.txt
+Social-Publishing-Agent/
+├── app.py                 # Streamlit app entrypoint
+├── config.py              # Configuration helpers (model names, paths, etc.)
+├── requirements.txt       # Python dependencies
+├── .gitignore             # Git ignore rules
 ├── data/
-│   ├── company_updates.csv
-│   └── post_history.db
-├── prompts/
-│   ├── linkedin_prompt.md
-│   ├── twitter_prompt.md
-│   └── instagram_prompt.md
-├── src/
-│   ├── data_loader.py
-│   ├── llm_agent.py
-│   ├── workflow.py
-│   ├── storage.py
-│   ├── approval.py
-│   ├── publisher.py
-│   └── platform_adapters/
-│       ├── linkedin_adapter.py
-│       ├── twitter_adapter.py
-│       ├── instagram_adapter.py
-│       └── facebook_adapter.py
+│   ├── company_updates.csv  # Source company updates (input)
+│   └── post_history.db      # SQLite database (auto-created)
+└── src/
+    ├── data_loader.py       # Load CSV and get update by ID
+    ├── llm_agent.py         # Generate social post text
+    ├── publisher.py         # Platform publishing helper
+    ├── research_agent.py    # Optional research + generation
+    ├── storage.py           # SQLite helpers (init, save, load, update, schedule)
+    ├── workflow.py          # High-level draft creation
+    └── platform_adapters/
+        ├── facebook_adapter.py
+        ├── instagram_adapter.py
+        ├── linkedin_adapter.py
+        └── twitter_adapter.py
 ```
 
-## How to Run
-1. Clone the repository
-2. Move into the project folder
-3. Install dependencies
+> Note: Database files, environment files, and local `.streamlit` configuration should **not** be committed to Git. See the `.gitignore` section in your repo for details.
+
+## Installation
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/RgreenKumar/Social-Publishing-Agent.git
+cd Social-Publishing-Agent
+```
+
+### 2. Create and activate a virtual environment
+
+```bash
+python -m venv .venv
+```
+
+Windows:
+
+```bash
+.venv\Scripts\activate
+```
+
+macOS/Linux:
+
+```bash
+source .venv/bin/activate
+```
+
+### 3. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-4. Create a `.env` file in the root directory
+## Configuration
 
-```env
-OPENAI_API_KEY=your_openai_api_key_here
-LINKEDIN_ACCESS_TOKEN=your_linkedin_token_here
-LINKEDIN_PERSON_URN=your_linkedin_person_urn_here
-META_ACCESS_TOKEN=your_meta_access_token_here
-INSTAGRAM_BUSINESS_ACCOUNT_ID=your_instagram_business_id_here
-PUBLISH_MODE=mock
-```
+The app expects:
 
-5. Run the Streamlit application
+- A CSV file at `data/company_updates.csv` with at least an `id` column and fields like `company`, `title`, `body`, and `type`.
+- A SQLite database file at `data/post_history.db` (auto-created).
+- Any AI / API keys configured via environment variables, `config.py`, or Streamlit secrets.
+
+Typical configuration files and variables:
+
+- **`.env`** (not committed):
+
+  ```env
+  OPENAI_API_KEY=your_api_key_here
+  MODEL_NAME=your_model_name
+  ```
+
+- **`.streamlit/secrets.toml`** (local only):
+
+  ```toml
+  OPENAI_API_KEY = "your_api_key_here"
+  MODEL_NAME = "your_model_name"
+  ```
+
+Adjust `config.py`, `llm_agent.py`, and `research_agent.py` to match the AI provider, model names, and authentication you use.
+
+## Running the App
+
+From the project root, with your virtual environment active:
 
 ```bash
 streamlit run app.py
 ```
 
-## Current Status
-This version is a working MVP that demonstrates:
-- input handling
-- AI/mock draft generation
-- human review
-- approval/rejection flow
-- status tracking
-- CSV export
+This opens the **AI Social Publishing Agent** dashboard in your browser.
 
-The app currently uses mock publishing mode for stable demonstration. Real API posting can be added later.
+## Using the App
 
-## Future Improvements
-- Real LinkedIn posting integration
-- Real Instagram professional account integration
-- Scheduling support
-- Multi-platform publishing in one workflow
-- Reviewer roles and authentication
-- Analytics dashboard
-- Better prompt templates
-- Rich text / hashtag controls
+The UI is organized into a sidebar and six main tabs: **Dashboard**, **Create Post**, **Research**, **Preview**, **History**, and **Publish**.
 
-## Notes
-- Public sample company-style updates are used in place of real company data
-- The project is intentionally scoped as a prototype/MVP
-- Mock mode is recommended for demos until real API integrations are fully tested
+### Dashboard
 
-## Author
-Built as a prototype Social Publishing Agent project for demonstrating AI content generation, approval workflow, and publishing status tracking.
+- Shows total posts and counts by status (Draft, Scheduled, Published, Failed).
+- Displays a short explanation of how to use the app.
+- Recommends posting times for the currently selected platform.
+- Lists a small table of recent posts for quick overview.
+
+### Create Post
+
+Use this tab to generate a new draft.
+
+1. **Choose Company Source (sidebar)**
+   - **Existing Company Update**: work from `data/company_updates.csv`.
+   - **Manual Company Research**: describe the company and desired post.
+
+2. **Select Platform and Tone (sidebar)**
+   - Platforms: LinkedIn, Twitter/X, Facebook, Instagram.
+   - Tone: Professional, Friendly, Formal, Excited, Marketing, Neutral.
+
+3. **Optionally Add Media (sidebar)**
+   - Choose media type: None, Image, or Video.
+   - Upload a file to see a preview.
+
+4. **If using Existing Company Update**
+   - The app loads rows from `data/company_updates.csv`.
+   - Choose a row from the dropdown (ID | Company | Title).
+   - Review the update details (company, title, type, body).
+   - Optionally add extra instructions (e.g. "Make it concise and engaging.").
+   - Click **"🤖 Generate Draft from Update"**.
+
+5. **If using Manual Company Research**
+   - Fill in:
+     - Company name.
+     - Official website (optional).
+     - Post title or topic.
+     - What the post should communicate (goal, audience, key points, CTA).
+     - Media / visual context.
+   - Click **"🔍 Research & Generate"**.
+   - If the research agent is available, the app retrieves a research summary and draft.
+   - If not, it falls back to a locally generated draft based on your inputs.
+
+After generation, the selected update and draft are stored in session state and become visible in the other tabs.
+
+### Research
+
+- Shows the **research report** associated with the current draft.
+- Lists any source links returned by the research agent.
+- If no report exists, the tab will prompt you to generate a draft first.
+
+### Preview & Save
+
+Use this tab to refine and store your draft.
+
+1. Edit the generated draft text in the text area.
+2. Choose a status for the draft: Draft, Approved, Needs Revision.
+3. Click **"💾 Save to History"** to insert a new record into the SQLite database.
+   - The app stores metadata such as update ID, company, title, platform, tone, research summary, and media details.
+4. Optionally click **"🔄 Update Saved Draft"** to overwrite the draft content for the last saved post.
+
+The saved post ID will be shown so you can track which history entry corresponds to your current draft.
+
+### History
+
+- Displays a table of all saved posts.
+- Shows key columns such as ID, timestamp, company, title, platform, tone, status, scheduled time, recommended time, and published URL (depending on schema).
+- Lets you select a specific post ID to inspect full details:
+  - Company, title, platform, status, publish mode.
+  - Scheduled time and recommended time.
+  - Saved draft content.
+  - Research summary (if any).
+  - Published URL, when available.
+
+### Publish & Schedule
+
+Use this tab to publish now or schedule a post for later.
+
+1. Ensure a draft is generated and saved (so it has a post ID).
+2. Choose **Publish Now** or **Schedule Post**.
+
+**Publish Now**
+
+- The app sends the current draft to the `publisher` module for the selected platform.
+- On success, it shows a message and any raw API response.
+- If a published URL is returned, the history entry is updated with status `published` and the URL.
+- On failure, the history entry can be updated with status `failed` and an error message.
+
+**Schedule Post**
+
+- Choose a future date and time.
+- The app shows the formatted scheduled datetime plus a recommended time label.
+- Click **"📅 Schedule Post"** to save the schedule metadata to the database.
+- It is up to your deployment or background jobs to honor this schedule and call the publisher at the right time.
+
+## Data & Storage
+
+All post history is stored in SQLite via `src/storage.py`.
+
+The `posts` table includes columns such as:
+
+- `id`: auto-increment primary key.
+- `timestamp`: when the record was created.
+- `update_id`: source company update ID (if any).
+- `company`: company name.
+- `title`: update or post title.
+- `platform`: platform key (e.g. `linkedin`, `twitter`).
+- `draft`: saved draft text.
+- `status`: draft status.
+
+Additional columns may be present for tone, scheduled time, recommended time, publish mode, research summary, media info, and published URL, depending on your exact implementation.
+
+The `storage` module exposes helpers to:
+
+- Initialize the database and create the `posts` table when the app starts.
+- Save a new post.
+- Load posts for dashboards and history views.
+- Update an existing draft.
+- Update post status and published URL.
+- Schedule posts and compute statistics.
+
+## Development Notes
+
+- Keep secrets out of version control: use `.env` or Streamlit secrets.
+- Do not commit `post_history.db` or local `.streamlit` config to Git.
+- Validate the CSV structure before relying on it in production.
+- Extend `publisher.py` and the platform adapters to integrate with real APIs.
+- Add tests for `data_loader.py`, `workflow.py`, and `storage.py` as the core logic.
+- Consider Docker or other deployment methods for production use.
+
+## Troubleshooting
+
+**Import errors**
+
+- Ensure the virtual environment is active.
+- Run `pip install -r requirements.txt` again.
+- Run `streamlit run app.py` from the project root.
+
+**CSV errors**
+
+- Confirm `data/company_updates.csv` exists.
+- Make sure it has an `id` column and valid data.
+
+**Database errors**
+
+- Check that the `data/` directory is writable.
+- Delete `post_history.db` if the schema becomes corrupted (it will be recreated).
+
+**Research agent not available**
+
+- The app gracefully falls back to a local draft generator when the research agent cannot be imported.
+- Configure your AI credentials and `research_agent.py` to enable full functionality.
+
+**Publishing issues**
+
+- Verify your platform credentials and API permissions.
+- Add logging inside `publisher.py` and adapters for debugging.
+
+---
+
+This README is designed to help new users understand, install, and use the AI Social Publishing Agent without needing to read the entire codebase first.

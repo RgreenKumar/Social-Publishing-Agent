@@ -1,53 +1,37 @@
 import os
-from typing import Optional, Any
+import json
+import re
+from typing import Optional, Any, List, Dict
 
+import requests
+from bs4 import BeautifulSoup
+from groq import Groq
 from dotenv import load_dotenv
-from openai import OpenAI
 
 load_dotenv()
 
-# The docs recommend gpt-5.5 for the web-search path.
-MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-5.5")
 
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY")
-)
+# --------- LLM / Client Setup ---------
 
-PLATFORM_GUIDANCE = {
-    "linkedin": """
-Use a professional but human tone.
-Begin with a strong opening line.
-Use short paragraphs.
-Highlight business value, achievement, or insight.
-Finish with a meaningful call to action.
-Use only a few relevant hashtags.
-""",
-    "instagram": """
-Write visually engaging and conversational content.
-Use a strong caption opening.
-Connect the caption clearly to the uploaded or planned media.
-Use relevant emojis only where natural.
-Finish with an engagement question or call to action.
-""",
-    "facebook": """
-Use an accessible, community-friendly tone.
-Explain the update clearly.
-Encourage comments, reactions, or visits.
-Avoid sounding overly corporate.
-""",
-    "x": """
-Be direct and concise.
-Lead with the most important message.
-Avoid unnecessary introduction.
-Use only highly relevant hashtags.
-""",
-    "twitter": """
-Be direct and concise.
-Lead with the most important message.
-Avoid unnecessary introduction.
-Use only highly relevant hashtags.
-""",
-}
+
+def get_groq_client() -> Groq | None:
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        return None
+    return Groq(api_key=api_key)
+
+
+# Choose a Groq model for research and generation
+RESEARCH_MODEL = os.getenv("GROQ_RESEARCH_MODEL", "llama-3.3-70b-versatile")
+
+
+# --------- Utility Functions ---------
+
+
+def safe_text(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def normalize_platform(platform: str) -> str:
@@ -82,61 +66,60 @@ def _walk_nodes(obj: Any):
             yield from _walk_nodes(item)
 
 
-def extract_web_sources(response) -> list[dict]:
+# --------- Web Search Helpers ---------
+
+
+def duckduckgo_search(query: str, max_results: int = 3) -> List[Dict]:
+    headers = {"User-Agent": "Mozilla/5.0"}
+    url = "https://html.duckduckgo.com/html/"
+    response = requests.post(url, data={"q": query}, headers=headers, timeout=15)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    results = []
+
+    for a in soup.select("a.result__a")[:max_results]:
+        title = safe_text(a.get_text(" ", strip=True))
+        href = safe_text(a.get("href"))
+        if title and href:
+            results.append({"title": title, "url": href})
+
+    return results
+
+
+def fetch_page_text(url: str, max_chars: int = 1200) -> str:
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        for tag in soup(["script", "style", "noscript"]):
+            tag.decompose()
+
+        text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+        return text[:max_chars]
+    except Exception:
+        return ""
+
+
+def extract_web_sources_from_payload(payload: dict) -> list[dict]:
     """
-    Extract sources from OpenAI Responses output.
-    Handles both:
-    - web_search_call.action.sources
-    - url_citation annotations in the response output
+    Extract sources from a Groq chat completion payload, if any were
+    encoded in the response. For now, we treat any URLs mentioned in
+    the model's JSON output as sources.
     """
     sources = []
     seen_urls = set()
-
-    try:
-        payload = response.model_dump()
-    except Exception:
-        return sources
 
     for node in _walk_nodes(payload):
         if not isinstance(node, dict):
             continue
 
-        node_type = node.get("type")
+        url = node.get("url")
+        title = node.get("title")
 
-        # Case 1: web_search_call action sources
-        if node_type == "web_search_call":
-            action = node.get("action") or {}
-            for source in action.get("sources", []) or []:
-                if not isinstance(source, dict):
-                    continue
-                url = source.get("url")
-                if not url or url in seen_urls:
-                    continue
-                seen_urls.add(url)
-                sources.append(
-                    {
-                        "title": source.get("title", "Web source"),
-                        "url": url,
-                    }
-                )
-
-        # Case 2: citation annotations
-        if node_type == "url_citation":
-            url = node.get("url")
-            if not url:
-                citation = node.get("url_citation")
-                if isinstance(citation, dict):
-                    url = citation.get("url")
-
-            if not url or url in seen_urls:
-                continue
-
-            title = node.get("title")
-            if not title:
-                citation = node.get("url_citation")
-                if isinstance(citation, dict):
-                    title = citation.get("title")
-
+        if url and url not in seen_urls:
             seen_urls.add(url)
             sources.append(
                 {
@@ -148,6 +131,43 @@ def extract_web_sources(response) -> list[dict]:
     return sources
 
 
+# --------- Platform Guidance ---------
+
+
+PLATFORM_GUIDANCE = {
+    "linkedin": """
+Use a professional but human tone.
+Begin with a strong opening line.
+Use short paragraphs.
+Highlight business value, achievement, or insight.
+Finish with a meaningful call to action.
+Use only a few relevant hashtags.
+""",
+    "instagram": """
+Write visually engaging and conversational content.
+Use a strong caption opening.
+Connect the caption clearly to the uploaded or planned media.
+Use relevant emojis only where natural.
+Finish with an engagement question or call to action.
+""",
+    "facebook": """
+Use an accessible, community-friendly tone.
+Explain the update clearly.
+Encourage comments, reactions, or visits.
+Avoid sounding overly corporate.
+""",
+    "x": """
+Be direct and concise.
+Lead with the most important message.
+Avoid unnecessary introduction.
+Use only highly relevant hashtags.
+""",
+}
+
+
+# --------- Research and Generation ---------
+
+
 def research_company(
     company: str,
     user_prompt: str,
@@ -155,17 +175,56 @@ def research_company(
     company_url: Optional[str] = None,
 ) -> dict:
     """
-    Searches the web and produces a factual company report.
+    Searches the web (via DuckDuckGo scraping) and produces a factual company report,
+    then uses Groq to summarize findings in a structured way.
     """
 
+    client = get_groq_client()
     platform_key = normalize_platform(platform)
+
+    if client is None:
+        return {
+            "report": "Research is temporarily unavailable (no GROQ_API_KEY configured).",
+            "sources": [],
+            "platform": platform_key,
+        }
 
     company_reference = company.strip()
     if company_url:
         company_reference += f"\nCompany website supplied by user: {company_url.strip()}"
 
+    # Use DuckDuckGo search to gather basic context & sources
+    queries = [
+        f"{company} latest news",
+        f"{company} official website",
+        user_prompt,
+    ]
+
+    context_blocks = []
+    sources = []
+
+    for q in queries:
+        try:
+            results = duckduckgo_search(q, max_results=2)
+        except Exception:
+            continue
+
+        for item in results:
+            title = safe_text(item.get("title"))
+            url = safe_text(item.get("url"))
+            if not url:
+                continue
+            page_text = fetch_page_text(url, max_chars=800)
+            if page_text:
+                context_blocks.append(
+                    f"Query: {q}\nTitle: {title}\nURL: {url}\nExcerpt: {page_text}"
+                )
+                sources.append({"title": title or "Web source", "url": url})
+
+    web_context = "\n\n".join(context_blocks)[:4000] or "No external web context available."
+
     research_prompt = f"""
-Research the company below for the purpose of creating a social-media post.
+You are a research assistant helping a social publishing agent.
 
 Company:
 {company_reference}
@@ -176,8 +235,11 @@ Target platform:
 User's requested post:
 {user_prompt}
 
+Collected web context:
+{web_context}
+
 Research requirements:
-1. Confirm that this is the correct company.
+1. Confirm that this is the correct company (if possible).
 2. Prefer the company's official website and official announcements.
 3. Find recent and relevant information related to the user's request.
 4. Identify the company's industry, products or services, and audience.
@@ -185,22 +247,38 @@ Research requirements:
 6. Clearly state when information cannot be verified.
 7. Produce a concise research report that a social-media copywriter can use.
 8. Separate verified facts from suggested creative angles.
-9. Return a research summary with clear bullets and source-backed notes.
+9. Return JSON with keys:
+   - summary: textual research summary
+   - bullets: list of key bullet points
 """
 
-    response = client.responses.create(
-        model=MODEL_NAME,
-        tools=[{"type": "web_search"}],
-        tool_choice="required",
-        include=["web_search_call.action.sources"],
-        input=research_prompt,
+    chat_completion = client.chat.completions.create(
+        model=RESEARCH_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": "Return only valid JSON with keys 'summary' and 'bullets'.",
+            },
+            {"role": "user", "content": research_prompt},
+        ],
+        temperature=0.2,
     )
 
-    report_text = getattr(response, "output_text", "") or ""
+    raw = chat_completion.choices[0].message.content
+
+    try:
+        data = json.loads(raw)
+        summary = safe_text(data.get("summary"))
+        bullets = data.get("bullets") or []
+        bullets = [safe_text(b) for b in bullets if b]
+        report_text = summary + "\n\n" + "\n".join(f"- {b}" for b in bullets)
+    except Exception:
+        # Fallback if model didn't follow JSON perfectly
+        report_text = raw.strip()
 
     return {
-        "report": report_text.strip(),
-        "sources": extract_web_sources(response),
+        "report": report_text,
+        "sources": sources,
         "platform": platform_key,
     }
 
@@ -214,11 +292,15 @@ def generate_platform_post(
     media_context: Optional[str] = None,
 ) -> str:
     """
-    Generates the final platform-specific draft using
-    verified research and the user's instructions.
+    Generates the final platform-specific draft using verified research and
+    the user's instructions, using Groq instead of OpenAI.
     """
 
+    client = get_groq_client()
     platform_key = normalize_platform(platform)
+
+    if client is None:
+        return "Publishing agent is temporarily unavailable (no GROQ_API_KEY configured)."
 
     platform_rules = PLATFORM_GUIDANCE.get(
         platform_key,
@@ -262,9 +344,16 @@ Important rules:
 - Do not include research notes inside the final post.
 - Return only the ready-to-publish social-media content.
 """
-    response = client.responses.create(
-        model=MODEL_NAME,
-        input=generation_prompt,
-    )
 
-    return (getattr(response, "output_text", "") or "").strip()
+    chat_completion = client.chat.completions.create(
+        model=RESEARCH_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a social publishing agent. Return only the final post text.",
+            },
+            {"role": "user", "content": generation_prompt},
+        ],
+        temperature=0.4,
+    )
+    return (chat_completion.choices[0].message.content or "").strip()

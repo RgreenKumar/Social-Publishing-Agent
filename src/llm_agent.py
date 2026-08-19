@@ -250,8 +250,8 @@ def generate_social_content(
 
     full_prompt = f"{schema_instructions}\n\n{prompt}"
 
-    chat_completion = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",  # or another free Groq model [214][225]
+    chat_completion = client.chat.completions.create (
+        model="openai/gpt-oss-120b",
         messages=[
             {
                 "role": "system",
@@ -260,7 +260,7 @@ def generate_social_content(
             {"role": "user", "content": full_prompt},
         ],
         temperature=0.7,
-    )
+   )
 
     raw_content = chat_completion.choices[0].message.content
     parsed = json.loads(raw_content)

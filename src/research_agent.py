@@ -11,8 +11,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-# --------- LLM / Client Setup ---------
-
 
 def get_groq_client() -> Groq | None:
     api_key = os.getenv("GROQ_API_KEY")
@@ -21,11 +19,7 @@ def get_groq_client() -> Groq | None:
     return Groq(api_key=api_key)
 
 
-# Choose a Groq model for research and generation
-RESEARCH_MODEL = os.getenv("GROQ_RESEARCH_MODEL", "llama-3.3-70b-versatile")
-
-
-# --------- Utility Functions ---------
+RESEARCH_MODEL = os.getenv("GROQ_RESEARCH_MODEL", "openai/gpt-oss-120b")
 
 
 def safe_text(value) -> str:
@@ -64,9 +58,6 @@ def _walk_nodes(obj: Any):
     elif isinstance(obj, list):
         for item in obj:
             yield from _walk_nodes(item)
-
-
-# --------- Web Search Helpers ---------
 
 
 def duckduckgo_search(query: str, max_results: int = 3) -> List[Dict]:
@@ -131,9 +122,6 @@ def extract_web_sources_from_payload(payload: dict) -> list[dict]:
     return sources
 
 
-# --------- Platform Guidance ---------
-
-
 PLATFORM_GUIDANCE = {
     "linkedin": """
 Use a professional but human tone.
@@ -164,8 +152,6 @@ Use only highly relevant hashtags.
 """,
 }
 
-
-# --------- Research and Generation ---------
 
 
 def research_company(

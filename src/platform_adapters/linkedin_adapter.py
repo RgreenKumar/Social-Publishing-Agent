@@ -1,12 +1,17 @@
 import os
 import requests
 
+
 from dotenv import load_dotenv
 load_dotenv()
 
 
+LINKEDIN_API_VERSION = os.getenv("LINKEDIN_API_VERSION", "202608")
+
+
 def publish_linkedin_post(content, post_data=None, company_data=None):
     mode = os.getenv("PUBLISH_MODE", "mock").strip().lower()
+
 
     # ---------------- MOCK MODE ----------------
     if mode != "real":
@@ -17,15 +22,19 @@ def publish_linkedin_post(content, post_data=None, company_data=None):
             "payload": content,
         }
 
+
     # ---------------- ENV ----------------
     access_token = os.getenv("LINKEDIN_ACCESS_TOKEN")
     person_urn = os.getenv("LINKEDIN_PERSON_URN")
 
+
     if not access_token:
         raise ValueError("LINKEDIN_ACCESS_TOKEN is missing")
 
+
     if not person_urn:
         raise ValueError("LINKEDIN_PERSON_URN is missing")
+
 
     # ---------------- CONTENT ----------------
     if isinstance(content, dict):
@@ -41,9 +50,9 @@ def publish_linkedin_post(content, post_data=None, company_data=None):
     else:
         final_post = str(content).strip()
 
-    # ---------------- OPTIONAL IMAGE UPLOAD ----------------
-      # ---------------- OPTIONAL IMAGE UPLOAD ----------------
+
     image_urn = None
+
 
     if isinstance(post_data, dict):
         image_bytes = post_data.get("image_bytes")
@@ -52,24 +61,29 @@ def publish_linkedin_post(content, post_data=None, company_data=None):
         image_bytes = None
         image_filename = "image.jpg"
 
+
     if image_bytes:
         # STEP 1: Initialize image upload
         init_url = "https://api.linkedin.com/rest/images?action=initializeUpload"
 
+
         init_headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
-            "LinkedIn-Version": "202508",
+            "LinkedIn-Version": LINKEDIN_API_VERSION,
             "X-Restli-Protocol-Version": "2.0.0",
         }
 
+
         owner_urn = person_urn if str(person_urn).startswith("urn:li:person:") else f"urn:li:person:{person_urn}"
+
 
         init_body = {
             "initializeUploadRequest": {
                 "owner": owner_urn
             }
         }
+
 
         init_response = requests.post(
             init_url,
@@ -78,19 +92,23 @@ def publish_linkedin_post(content, post_data=None, company_data=None):
             timeout=30,
         )
 
+
         if init_response.status_code not in (200, 201):
             raise RuntimeError(
                 f"LinkedIn image init error {init_response.status_code}\n{init_response.text}"
             )
 
+
         init_data = init_response.json()
         upload_url = init_data["value"]["uploadUrl"]
         image_urn = init_data["value"]["image"]
+
 
         # STEP 2: Upload binary image to the signed upload URL
         upload_headers = {
             "Content-Type": "application/octet-stream",
         }
+
 
         upload_response = requests.put(
             upload_url,
@@ -99,20 +117,24 @@ def publish_linkedin_post(content, post_data=None, company_data=None):
             timeout=30,
         )
 
+
         if upload_response.status_code not in (200, 201, 202):
             raise RuntimeError(
                 f"LinkedIn image upload error {upload_response.status_code}\n{upload_response.text}"
             )
 
+
     # ---------------- REQUEST: POST WITH OR WITHOUT MEDIA ----------------
     url = "https://api.linkedin.com/rest/posts"
+
 
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
-        "LinkedIn-Version": "202508",
+        "LinkedIn-Version": LINKEDIN_API_VERSION,
         "X-Restli-Protocol-Version": "2.0.0",
     }
+
 
     payload = {
         "author": f"urn:li:person:{person_urn}",
@@ -127,15 +149,14 @@ def publish_linkedin_post(content, post_data=None, company_data=None):
         "isReshareDisabledByAuthor": False,
     }
 
-     # Attach media if we have an image URN
+
     if image_urn:
         payload["content"] = {
             "media": {
                 "id": image_urn,
-                # optional but recommended:
-                # "altText": "Image attached by social publishing agent"
-            }
+                }
         }
+
 
     response = requests.post(
         url,
@@ -143,6 +164,7 @@ def publish_linkedin_post(content, post_data=None, company_data=None):
         json=payload,
         timeout=30,
     )
+
 
     # Duplicate-post handling
     if response.status_code == 422:
@@ -160,10 +182,12 @@ def publish_linkedin_post(content, post_data=None, company_data=None):
         except ValueError:
             pass
 
+
     if response.status_code not in (200, 201):
         raise RuntimeError(
             f"LinkedIn Error {response.status_code}\n{response.text}"
         )
+
 
     return {
         "status": "posted",
